@@ -1,0 +1,762 @@
+#include "PluginEditor.h"
+
+using namespace juce;
+using namespace omni;
+
+static void setupRotary (look::Knob& k, double lo, double hi, double mid, const String& suffix = {})
+{
+    k.slider.setRange (lo, hi);
+    if (mid > lo && mid < hi) k.slider.setSkewFactorFromMidPoint (mid);
+    k.slider.setTextValueSuffix (suffix);
+    k.slider.setTextBoxStyle (Slider::TextBoxBelow, false, 62, 14);
+    k.slider.setNumDecimalPlacesToDisplay (2);
+    k.label.setFont (FontOptions (10.5f));
+}
+
+// =============================================================================================
+VoicingControls::VoicingControls()
+{
+    setupRotary (vol, -48, 12, -12, " dB");
+    setupRotary (pan, -1, 1, 0);
+    setupRotary (tune, -24, 24, 0, " st");
+    setupRotary (att, 0.0005, 5, 0.1, " s");
+    setupRotary (dec, 0.01, 10, 0.5, " s");
+    setupRotary (sus, 0, 1, 0.5);
+    setupRotary (rel, 0.01, 10, 0.5, " s");
+    setupRotary (cut, 20, 20000, 1000, " Hz");
+    setupRotary (res, 0, 1, 0.5);
+    setupRotary (vs, 0, 1, 0.5);
+    cut.slider.setNumDecimalPlacesToDisplay (0);
+    ftype.addItemList ({ "Off", "Low pass", "High pass", "Band pass" }, 1);
+    rr.addItemList ({ "In order", "Random", "Random, no repeat" }, 1);
+    for (auto* l : { &ftypeLabel, &rrLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); }
+    for (auto* k : { &vol, &pan, &tune, &att, &dec, &sus, &rel, &cut, &res, &vs })
+    {
+        k->slider.onValueChange = [this] { push(); };
+        addAndMakeVisible (k);
+    }
+    ftype.onChange = [this] { push(); };
+    rr.onChange = [this] { push(); };
+    for (auto* c : std::initializer_list<Component*> { &ftype, &rr, &ftypeLabel, &rrLabel }) addAndMakeVisible (c);
+}
+
+void VoicingControls::refresh()
+{
+    if (! get) return;
+    const auto v = get();
+    updating = true;
+    vol.slider.setValue (v.volumeDb, dontSendNotification); pan.slider.setValue (v.pan, dontSendNotification);
+    tune.slider.setValue (v.tuneSemis, dontSendNotification);
+    att.slider.setValue (v.env.attack, dontSendNotification); dec.slider.setValue (v.env.decay, dontSendNotification);
+    sus.slider.setValue (v.env.sustain, dontSendNotification); rel.slider.setValue (v.env.release, dontSendNotification);
+    cut.slider.setValue (v.filter.cutoff, dontSendNotification); res.slider.setValue (v.filter.resonance, dontSendNotification);
+    vs.slider.setValue (v.velSens, dontSendNotification);
+    ftype.setSelectedId ((int) v.filter.type + 1, dontSendNotification);
+    rr.setSelectedId ((int) v.rr + 1, dontSendNotification);
+    cut.setEnabled (v.filter.type != FilterType::Off);
+    res.setEnabled (v.filter.type != FilterType::Off);
+    updating = false;
+}
+
+void VoicingControls::push()
+{
+    if (updating || ! get || ! set) return;
+    auto v = get();
+    v.volumeDb = (float) vol.slider.getValue(); v.pan = (float) pan.slider.getValue(); v.tuneSemis = (float) tune.slider.getValue();
+    v.env = { (float) att.slider.getValue(), (float) dec.slider.getValue(), (float) sus.slider.getValue(), (float) rel.slider.getValue() };
+    v.filter.type = (FilterType) jmax (0, ftype.getSelectedId() - 1);
+    v.filter.cutoff = (float) cut.slider.getValue(); v.filter.resonance = (float) res.slider.getValue();
+    v.velSens = (float) vs.slider.getValue();
+    v.rr = (RRMode) jmax (0, rr.getSelectedId() - 1);
+    cut.setEnabled (v.filter.type != FilterType::Off);
+    res.setEnabled (v.filter.type != FilterType::Off);
+    set (v);
+}
+
+void VoicingControls::resized()
+{
+    auto r = getLocalBounds();
+    auto row1 = r.removeFromTop (r.getHeight() / 2);
+    const int w = row1.getWidth() / 6;
+    for (auto* k : { &vol, &pan, &tune, &vs }) k->setBounds (row1.removeFromLeft (w));
+    auto combos = row1.reduced (4, 6);
+    ftypeLabel.setBounds (combos.removeFromTop (14)); ftype.setBounds (combos.removeFromTop (24)); combos.removeFromTop (4);
+    rrLabel.setBounds (combos.removeFromTop (14)); rr.setBounds (combos.removeFromTop (24));
+    const int w2 = r.getWidth() / 6;
+    for (auto* k : { &att, &dec, &sus, &rel, &cut, &res }) k->setBounds (r.removeFromLeft (w2));
+}
+
+// =============================================================================================
+ZoneEditor::ZoneEditor (bool keysMode) : keys (keysMode)
+{
+    auto setup = [this] (Field& f, const String& name, double lo, double hi, double step)
+    {
+        f.label.setText (name, dontSendNotification);
+        f.label.setFont (FontOptions (11.0f));
+        f.label.setColour (Label::textColourId, look::textDim);
+        f.slider.setSliderStyle (Slider::IncDecButtons);
+        f.slider.setTextBoxStyle (Slider::TextBoxLeft, false, 56, 22);
+        f.slider.setRange (lo, hi, step);
+        f.slider.onValueChange = [this]
+        {
+            if (updating || ! set || ! get || get() == nullptr) return;
+            auto z = shown;
+            z.root = (int) root.slider.getValue(); z.loKey = (int) loKey.slider.getValue(); z.hiKey = (int) hiKey.slider.getValue();
+            z.loVel = (int) loVel.slider.getValue(); z.hiVel = (int) hiVel.slider.getValue(); z.rrPos = (int) rrPos.slider.getValue();
+            z.tuneCents = (float) tune.slider.getValue(); z.gainDb = (float) gain.slider.getValue();
+            z.hiKey = jmax (z.hiKey, z.loKey); z.hiVel = jmax (z.hiVel, z.loVel);
+            set (z);
+        };
+        addAndMakeVisible (f.label);
+        addAndMakeVisible (f.slider);
+    };
+    setup (root, "Root", 0, 127, 1); setup (loKey, "Low key", 0, 127, 1); setup (hiKey, "High key", 0, 127, 1);
+    setup (loVel, "Low vel", 1, 127, 1); setup (hiVel, "High vel", 1, 127, 1); setup (rrPos, "Round robin #", 0, 32, 1);
+    setup (tune, "Tune (cents)", -1200, 1200, 1); setup (gain, "Gain (dB)", -48, 24, 0.1);
+    for (auto* f : { &root, &loKey, &hiKey })
+    {
+        f->slider.textFromValueFunction = [] (double v) { return noteName ((int) v); };
+        f->slider.valueFromTextFunction = [] (const String& t) { for (int n = 0; n < 128; ++n) if (noteName (n).equalsIgnoreCase (t.trim())) return (double) n; return (double) t.getIntValue(); };
+        f->slider.setTextBoxStyle (Slider::TextBoxLeft, false, 56, 22);
+        f->label.setVisible (keys); f->slider.setVisible (keys);
+    }
+    loop.onClick = [this]
+    {
+        if (updating || ! set || ! get || get() == nullptr) return;
+        auto z = shown;
+        z.loop = loop.getToggleState();
+        if (z.loop && z.loopEnd <= z.loopStart && z.sample)
+        {
+            z.loopStart = z.sample->data.getNumSamples() / 4;
+            z.loopEnd = z.sample->data.getNumSamples() - 1;
+        }
+        set (z);
+    };
+    loop.setVisible (keys);
+    addAndMakeVisible (loop);
+    fileName.setFont (FontOptions (12.0f));
+    fileName.setMinimumHorizontalScale (0.5f);
+    addAndMakeVisible (fileName);
+}
+
+void ZoneEditor::refresh()
+{
+    const Zone* z = get ? get() : nullptr;
+    updating = true;
+    setEnabled (z != nullptr);
+    if (z != nullptr)
+    {
+        shown = *z;
+        root.slider.setValue (z->root, dontSendNotification); loKey.slider.setValue (z->loKey, dontSendNotification);
+        hiKey.slider.setValue (z->hiKey, dontSendNotification); loVel.slider.setValue (z->loVel, dontSendNotification);
+        hiVel.slider.setValue (z->hiVel, dontSendNotification); rrPos.slider.setValue (z->rrPos, dontSendNotification);
+        tune.slider.setValue (z->tuneCents, dontSendNotification); gain.slider.setValue (z->gainDb, dontSendNotification);
+        loop.setToggleState (z->loop, dontSendNotification);
+        fileName.setText (z->sample ? z->sample->file.getFileName() + "   (" + String (z->sample->loudDb, 1) + " dB loudest)" : String(), dontSendNotification);
+    }
+    else
+    {
+        shown = {};
+        fileName.setText ("No zone selected", dontSendNotification);
+    }
+    updating = false;
+    repaint();
+}
+
+void ZoneEditor::paint (Graphics& g)
+{
+    auto wave = getLocalBounds().removeFromTop (70).reduced (0, 4).toFloat().withTrimmedTop (18);
+    g.setColour (look::panelHi);
+    g.fillRoundedRectangle (wave, 4.0f);
+    if (shown.sample == nullptr) return;
+    const auto& d = shown.sample->data;
+    const int n = d.getNumSamples();
+    if (n == 0) return;
+    g.setColour (findParentComponentOfClass<OmniEditor>() ? findParentComponentOfClass<OmniEditor>()->lnf.accent : look::text);
+    const int W = (int) wave.getWidth();
+    const float mid = wave.getCentreY();
+    float pk = 0.0f;
+    for (int c = 0; c < d.getNumChannels(); ++c) pk = jmax (pk, d.getMagnitude (c, 0, n));
+    const float h = wave.getHeight() * 0.45f / jmax (pk, 1.0e-4f);   // drawn normalised
+    for (int x = 0; x < W; ++x)
+    {
+        const int s0 = (int) ((int64) x * n / W), s1 = jmax (s0 + 1, (int) ((int64) (x + 1) * n / W));
+        auto mm = d.findMinMax (0, s0, s1 - s0);
+        g.drawVerticalLine ((int) wave.getX() + x, mid - mm.getEnd() * h, mid - mm.getStart() * h + 1.0f);
+    }
+    if (shown.loop && shown.loopEnd > shown.loopStart)
+    {
+        g.setColour (Colours::yellow.withAlpha (0.6f));
+        g.drawVerticalLine ((int) (wave.getX() + wave.getWidth() * shown.loopStart / n), wave.getY(), wave.getBottom());
+        g.drawVerticalLine ((int) (wave.getX() + wave.getWidth() * shown.loopEnd / n), wave.getY(), wave.getBottom());
+    }
+}
+
+void ZoneEditor::resized()
+{
+    auto r = getLocalBounds();
+    fileName.setBounds (r.removeFromTop (18));
+    r.removeFromTop (54);
+    auto cols = r;
+    const int colW = cols.getWidth() / 2;
+    auto left = cols.removeFromLeft (colW).reduced (2, 0), right = cols.reduced (2, 0);
+    auto place = [] (Rectangle<int>& col, Field& f) { auto row = col.removeFromTop (26); f.label.setBounds (row.removeFromLeft (84)); f.slider.setBounds (row); col.removeFromTop (3); };
+    if (keys) { place (left, root); place (left, loKey); place (left, hiKey); }
+    place (left, loVel); place (left, hiVel);
+    place (right, rrPos); place (right, tune); place (right, gain);
+    if (keys) loop.setBounds (right.removeFromTop (24));
+}
+
+// =============================================================================================
+PadButton::PadButton (OmniEditor& e, int s) : ed (e), slot (s) {}
+
+int PadButton::padIndex() const { return ed.bank * kPadsPerBank + slot; }
+
+void PadButton::paint (Graphics& g)
+{
+    const int pi = padIndex();
+    auto inst = ed.proc.getInstrument();
+    const auto& p = inst->pads[pi];
+    auto r = getLocalBounds().toFloat().reduced (3);
+    const bool sel = pi == ed.selectedPad;
+    const bool has = ! p.zones.empty();
+    g.setColour (has ? look::panelHi : look::panel);
+    g.fillRoundedRectangle (r, 7.0f);
+    if (flash > 0.01f)
+    {
+        g.setColour (ed.lnf.accent.withAlpha (0.55f * flash));
+        g.fillRoundedRectangle (r, 7.0f);
+    }
+    g.setColour (hover ? Colours::white : sel ? ed.lnf.accent : look::outline);
+    g.drawRoundedRectangle (r, 7.0f, sel || hover ? 2.0f : 1.0f);
+    g.setColour (look::textDim);
+    g.setFont (FontOptions (11.0f));
+    g.drawText (String::charToString ((juce_wchar) "ABCD"[ed.bank]) + String (slot + 1) + "  " + noteName (p.note), r.reduced (8, 6), Justification::topLeft);
+    g.setColour (has ? look::text : look::textDim.withAlpha (0.5f));
+    g.setFont (FontOptions (13.0f, Font::bold));
+    g.drawFittedText (has ? p.name : String ("drop samples"), r.reduced (8, 20).toNearestInt(), Justification::centred, 2);
+    if (has)
+    {
+        int rr = 0;
+        for (auto& z : p.zones) rr = jmax (rr, z.rrPos);
+        g.setColour (look::textDim);
+        g.setFont (FontOptions (10.5f));
+        String info = String ((int) p.zones.size()) + (p.zones.size() == 1 ? " sample" : " samples");
+        if (rr > 0) info << "  RR" << rr;
+        if (p.chokeGroup > 0) info << "  choke " << p.chokeGroup;
+        g.drawText (info, r.reduced (8, 6), Justification::bottomLeft);
+    }
+}
+
+void PadButton::mouseDown (const MouseEvent&)
+{
+    ed.selectPad (padIndex());
+    const auto& p = ed.proc.getInstrument()->pads[padIndex()];
+    ed.proc.keyboardState.noteOn (ed.playChannel (true), p.note, 0.8f);
+}
+
+void PadButton::mouseUp (const MouseEvent&)
+{
+    const auto& p = ed.proc.getInstrument()->pads[padIndex()];
+    ed.proc.keyboardState.noteOff (ed.playChannel (true), p.note, 0.0f);
+}
+
+void PadButton::filesDropped (const StringArray& files, int, int)
+{
+    hover = false;
+    Array<File> fs;
+    for (auto& f : files)
+    {
+        File file (f);
+        if (file.isDirectory()) fs.addArray (file.findChildFiles (File::findFiles, false, "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg"));
+        else if (isAudioFile (file)) fs.add (file);
+    }
+    if (fs.isEmpty()) { ed.showMessage ("Nothing to load", "Drop audio files (WAV, AIFF, FLAC, MP3, OGG) on a pad."); return; }
+    const auto msg = ed.proc.loadFilesToPad (padIndex(), fs, ed.dropMode());
+    ed.selectPad (padIndex());
+    if (msg.isNotEmpty()) ed.showMessage ("Some files didn't load", msg);
+}
+
+// =============================================================================================
+ZoneMap::ZoneMap (OmniEditor& e) : ed (e) {}
+
+void ZoneMap::paint (Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    g.setColour (look::panel);
+    g.fillRoundedRectangle (r, 6.0f);
+    const float kw = r.getWidth() / 128.0f;
+    for (int k = 0; k < 128; ++k)
+        if (k % 12 == 0)
+        {
+            g.setColour (Colours::white.withAlpha (0.06f));
+            g.drawVerticalLine ((int) (r.getX() + k * kw), r.getY(), r.getBottom());
+            g.setColour (look::textDim);
+            g.setFont (FontOptions (10.0f));
+            g.drawText (noteName (k), (int) (r.getX() + k * kw) + 2, (int) r.getBottom() - 14, 30, 12, Justification::left);
+        }
+    auto inst = ed.proc.getInstrument();
+    const auto& zones = inst->keys.zones;
+    const float h = r.getHeight() - 16.0f;
+    for (int i = 0; i < (int) zones.size(); ++i)
+    {
+        const auto& z = zones[(size_t) i];
+        const float x0 = r.getX() + z.loKey * kw, x1 = r.getX() + (z.hiKey + 1) * kw;
+        const float y0 = r.getY() + (127 - z.hiVel) / 127.0f * h, y1 = r.getY() + (128 - z.loVel) / 127.0f * h;
+        const auto col = Colour::fromHSV (std::fmod (0.7f + (z.root % 12) * 0.083f, 1.0f), 0.5f, 0.9f, 1.0f);
+        const bool sel = i == ed.selectedKeyZone;
+        g.setColour (col.withAlpha (sel ? 0.55f : 0.22f));
+        g.fillRect (Rectangle<float> (x0, y0, x1 - x0, y1 - y0).reduced (0.5f));
+        g.setColour (col.withAlpha (sel ? 1.0f : 0.6f));
+        g.drawRect (Rectangle<float> (x0, y0, x1 - x0, y1 - y0).reduced (0.5f), sel ? 2.0f : 1.0f);
+        g.setColour (Colours::white);
+        g.fillRect (r.getX() + (z.root + 0.5f) * kw - 1.0f, y1 - 6.0f, 2.0f, 5.0f);
+    }
+    if (zones.empty())
+    {
+        g.setColour (look::textDim);
+        g.setFont (FontOptions (15.0f));
+        g.drawFittedText ("Drop samples, a folder, an .sfz, .dspreset or .dslibrary here.\n"
+                          "Notes are read from file names (C4 = middle C), file metadata, or detected from the audio.\n"
+                          "Several samples on the same note become velocity layers by loudness.",
+                          getLocalBounds().reduced (20), Justification::centred, 4);
+    }
+    if (hover) { g.setColour (ed.lnf.accent); g.drawRoundedRectangle (r.reduced (1), 6.0f, 2.0f); }
+}
+
+void ZoneMap::mouseDown (const MouseEvent& e)
+{
+    auto inst = ed.proc.getInstrument();
+    const auto& zones = inst->keys.zones;
+    const auto r = getLocalBounds().toFloat();
+    const int key = (int) ((e.position.x - r.getX()) / (r.getWidth() / 128.0f));
+    const int vel = 127 - (int) ((e.position.y - r.getY()) / (r.getHeight() - 16.0f) * 127.0f);
+    for (int i = (int) zones.size() - 1; i >= 0; --i)
+    {
+        const auto& z = zones[(size_t) i];
+        if (key >= z.loKey && key <= z.hiKey && vel >= z.loVel && vel <= z.hiVel) { ed.selectKeyZone (i); return; }
+    }
+}
+
+void ZoneMap::filesDropped (const StringArray& files, int, int)
+{
+    hover = false;
+    Array<File> fs;
+    for (auto& f : files) fs.add (File (f));
+    const bool replace = ed.proc.getInstrument()->keys.zones.empty() || ! ModifierKeys::currentModifiers.isShiftDown();
+    const auto msg = ed.proc.loadFilesToKeys (fs, replace);
+    ed.selectKeyZone (0);
+    if (msg.isNotEmpty()) ed.showMessage ("Note", msg);
+}
+
+// =============================================================================================
+OmniEditor::OmniEditor (OmniProcessor& p)
+    : AudioProcessorEditor (p), proc (p), keyboard (p.keyboardState, MidiKeyboardComponent::horizontalKeyboard)
+{
+    setLookAndFeel (&lnf);
+    shownInst = proc.getInstrument();
+    logo.setText ("OMNISAMPLER", dontSendNotification);
+    logo.setFont (FontOptions (19.0f, Font::bold));
+    logo.setColour (Label::textColourId, lnf.accent);
+    voices.setColour (Label::textColourId, look::textDim);
+    voices.setFont (FontOptions (12.0f));
+
+    padsTab.setRadioGroupId (1); keysTab.setRadioGroupId (1);
+    padsTab.setClickingTogglesState (true); keysTab.setClickingTogglesState (true);
+    padsTab.onClick = [this] { setView (false); };
+    keysTab.onClick = [this] { setView (true); };
+    aMaster = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "master", masterKnob.slider);
+    masterKnob.slider.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+    masterKnob.slider.setPopupDisplayEnabled (true, true, this);
+    masterKnob.label.setFont (FontOptions (10.0f));
+    for (auto* c : { &padsCh, &keysCh })
+    {
+        c->addItem ("Any", 1);
+        for (int i = 1; i <= 16; ++i) c->addItem ("Ch " + String (i), i + 1);
+    }
+    aPadsCh = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "padsch", padsCh);
+    aKeysCh = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "keysch", keysCh);
+    for (auto* l : { &padsChLabel, &keysChLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); l->setJustificationType (Justification::centredRight); }
+
+    loadKitBtn.onClick = [this]
+    {
+        chooser = std::make_unique<FileChooser> ("Load kit, SFZ or DecentSampler", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler"),
+                                                 "*.omni;*.sfz;*.dspreset;*.dslibrary");
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc)
+        {
+            auto f = fc.getResult();
+            if (! f.existsAsFile()) return;
+            const auto msg = f.hasFileExtension ("omni") ? proc.loadKit (f) : proc.loadInstrumentFile (f);
+            if (! f.hasFileExtension ("omni")) setView (true);
+            refreshAll();
+            if (msg.isNotEmpty()) showMessage ("Note", msg);
+        });
+    };
+    saveKitBtn.onClick = [this]
+    {
+        auto dir = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler");
+        dir.createDirectory();
+        chooser = std::make_unique<FileChooser> ("Save kit", dir.getChildFile ("My kit.omni"), "*.omni");
+        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
+        {
+            auto f = fc.getResult();
+            if (f == File()) return;
+            const auto msg = proc.saveKit (f.withFileExtension ("omni"));
+            if (msg.isNotEmpty()) showMessage ("Couldn't save", msg);
+        });
+    };
+
+    // ---- pads ----
+    for (int b = 0; b < 4; ++b)
+    {
+        bankBtn[b].setRadioGroupId (2);
+        bankBtn[b].setClickingTogglesState (true);
+        bankBtn[b].onClick = [this, b] { bank = b; selectPad (b * kPadsPerBank + selectedPad % kPadsPerBank); };
+        addAndMakeVisible (bankBtn[b]);
+    }
+    bankBtn[0].setToggleState (true, dontSendNotification);
+    for (int i = 0; i < kPadsPerBank; ++i) { padButtons[i] = std::make_unique<PadButton> (*this, i); addAndMakeVisible (*padButtons[i]); }
+
+    padTitle.setFont (FontOptions (16.0f, Font::bold));
+    padTitle.setEditable (false, true);
+    padTitle.onTextChange = [this] { const auto t = padTitle.getText(); proc.edit ([&] (Instrument& in) { in.pads[selectedPad].name = t; }); refreshAll(); };
+    for (int n = 0; n < 128; ++n) padNote.addItem (noteName (n) + " (" + String (n) + ")", n + 1);
+    padNote.onChange = [this] { const int n = padNote.getSelectedId() - 1; if (n >= 0) proc.edit ([&] (Instrument& in) { in.pads[selectedPad].note = n; }); refreshAll(); };
+    chokeBox.addItem ("None", 1);
+    for (int i = 1; i <= 8; ++i) chokeBox.addItem ("Group " + String (i), i + 1);
+    chokeBox.onChange = [this] { const int c = chokeBox.getSelectedId() - 1; proc.edit ([&] (Instrument& in) { in.pads[selectedPad].chokeGroup = jmax (0, c); }); refreshAll(); };
+    dropModeBox.addItem ("Velocity layers (by loudness)", 1);
+    dropModeBox.addItem ("Round robins", 2);
+    dropModeBox.setSelectedId (1, dontSendNotification);
+    oneShot.onClick = [this] { const bool v = oneShot.getToggleState(); proc.edit ([&] (Instrument& in) { in.pads[selectedPad].oneShot = v; }); };
+    for (auto* l : { &padNoteLabel, &chokeLabel, &dropLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); }
+    addToPadBtn.onClick = [this]
+    {
+        chooser = std::make_unique<FileChooser> ("Add samples to pad", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+            [this] (const FileChooser& fc)
+            {
+                if (fc.getResults().isEmpty()) return;
+                const auto msg = proc.loadFilesToPad (selectedPad, fc.getResults(), dropMode());
+                refreshAll();
+                if (msg.isNotEmpty()) showMessage ("Some files didn't load", msg);
+            });
+    };
+    clearPadBtn.onClick = [this] { proc.edit ([this] (Instrument& in) { in.pads[selectedPad].zones.clear(); in.pads[selectedPad].name.clear(); }); refreshAll(); };
+    remapBtn.onClick = [this]
+    {
+        proc.edit ([this] (Instrument& in)
+        {
+            std::vector<Zone*> ptrs;
+            for (auto& z : in.pads[selectedPad].zones) { z.rrPos = 0; ptrs.push_back (&z); }
+            assignVelocityByLoudness (ptrs);
+        });
+        refreshAll();
+    };
+    removeZoneBtn.onClick = [this] { deleteKeyPressed (zoneList.getSelectedRow()); };
+
+    padZoneEditor.get = [this]() -> const Zone*
+    {
+        const auto& zs = shownInst->pads[selectedPad].zones;
+        return selectedPadZone >= 0 && selectedPadZone < (int) zs.size() ? &zs[(size_t) selectedPadZone] : nullptr;
+    };
+    padZoneEditor.set = [this] (const Zone& z)
+    {
+        proc.edit ([&] (Instrument& in) { auto& zs = in.pads[selectedPad].zones; if (selectedPadZone < (int) zs.size()) zs[(size_t) selectedPadZone] = z; });
+        shownInst = proc.getInstrument();
+        zoneList.repaint();
+    };
+    padVoicing.get = [this] { return proc.getInstrument()->pads[selectedPad].voicing; };
+    padVoicing.set = [this] (const Voicing& v) { proc.edit ([&] (Instrument& in) { in.pads[selectedPad].voicing = v; }); };
+
+    // ---- keys ----
+    keysTitle.setFont (FontOptions (16.0f, Font::bold));
+    keyboard.setAvailableRange (21, 108);
+    keyboard.setMidiChannel (1);
+    loadInstBtn.onClick = [this]
+    {
+        chooser = std::make_unique<FileChooser> ("Load instrument", File::getSpecialLocation (File::userDocumentsDirectory), "*.sfz;*.dspreset;*.dslibrary");
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc)
+        {
+            if (! fc.getResult().existsAsFile()) return;
+            const auto msg = proc.loadInstrumentFile (fc.getResult());
+            selectKeyZone (0);
+            if (msg.isNotEmpty()) showMessage ("Note", msg);
+        });
+    };
+    addKeysBtn.onClick = [this]
+    {
+        chooser = std::make_unique<FileChooser> ("Add samples to the keys", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+            [this] (const FileChooser& fc)
+            {
+                if (fc.getResults().isEmpty()) return;
+                const auto msg = proc.loadFilesToKeys (fc.getResults(), false);
+                selectKeyZone (0);
+                if (msg.isNotEmpty()) showMessage ("Note", msg);
+            });
+    };
+    saveSfzBtn.onClick = [this]
+    {
+        chooser = std::make_unique<FileChooser> ("Save keys as SFZ", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler/instrument.sfz"), "*.sfz");
+        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
+        {
+            auto f = fc.getResult();
+            if (f == File()) return;
+            String err;
+            if (! saveSfz (proc.getInstrument()->keys, f.withFileExtension ("sfz"), err)) showMessage ("Couldn't save", err);
+        });
+    };
+    clearKeysBtn.onClick = [this] { proc.edit ([] (Instrument& in) { in.keys.zones.clear(); in.keys.name.clear(); }); selectKeyZone (0); };
+
+    keyZoneEditor.get = [this]() -> const Zone*
+    {
+        const auto& zs = shownInst->keys.zones;
+        return selectedKeyZone >= 0 && selectedKeyZone < (int) zs.size() ? &zs[(size_t) selectedKeyZone] : nullptr;
+    };
+    keyZoneEditor.set = [this] (const Zone& z)
+    {
+        proc.edit ([&] (Instrument& in) { auto& zs = in.keys.zones; if (selectedKeyZone < (int) zs.size()) zs[(size_t) selectedKeyZone] = z; });
+        shownInst = proc.getInstrument();
+        zoneList.repaint();
+        zoneMap.repaint();
+    };
+    keyVoicing.get = [this] { return proc.getInstrument()->keys.voicing; };
+    keyVoicing.set = [this] (const Voicing& v) { proc.edit ([&] (Instrument& in) { in.keys.voicing = v; }); };
+
+    zoneList.setRowHeight (22);
+
+    for (auto* c : std::initializer_list<Component*> { &logo, &voices, &padsTab, &keysTab, &masterKnob, &padsCh, &keysCh, &padsChLabel, &keysChLabel,
+                                                       &loadKitBtn, &saveKitBtn, &padTitle, &padNote, &chokeBox, &dropModeBox, &oneShot, &padNoteLabel,
+                                                       &chokeLabel, &dropLabel, &addToPadBtn, &clearPadBtn, &remapBtn, &removeZoneBtn, &zoneMap, &keyboard,
+                                                       &keysTitle, &loadInstBtn, &addKeysBtn, &saveSfzBtn, &clearKeysBtn, &zoneList, &padZoneEditor,
+                                                       &keyZoneEditor, &padVoicing, &keyVoicing })
+        addAndMakeVisible (c);
+
+    setResizable (true, true);
+    setResizeLimits (1000, 700, 2200, 1400);
+    setSize (1220, 800);
+    padsTab.setToggleState (true, dontSendNotification);
+    setView (false);
+    selectPad (0);
+    startTimerHz (30);
+}
+
+OmniEditor::~OmniEditor() { setLookAndFeel (nullptr); }
+
+int OmniEditor::playChannel (bool pads) const
+{
+    const int ch = pads ? proc.padsChannel() : proc.keysChannel();
+    return ch == 0 ? (pads ? 10 : 1) : ch;
+}
+
+void OmniEditor::showMessage (const String& title, const String& text)
+{
+    AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, title, text, "OK", this);
+}
+
+void OmniEditor::setView (bool keys)
+{
+    showingKeys = keys;
+    padsTab.setToggleState (! keys, dontSendNotification);
+    keysTab.setToggleState (keys, dontSendNotification);
+    for (auto* c : std::initializer_list<Component*> { &bankBtn[0], &bankBtn[1], &bankBtn[2], &bankBtn[3], &padTitle, &padNote, &chokeBox, &dropModeBox,
+                                                       &oneShot, &padNoteLabel, &chokeLabel, &dropLabel, &addToPadBtn, &clearPadBtn, &remapBtn,
+                                                       &padZoneEditor, &padVoicing })
+        c->setVisible (! keys);
+    for (auto& pb : padButtons) pb->setVisible (! keys);
+    for (auto* c : std::initializer_list<Component*> { &zoneMap, &keyboard, &keysTitle, &loadInstBtn, &addKeysBtn, &saveSfzBtn, &clearKeysBtn,
+                                                       &keyZoneEditor, &keyVoicing })
+        c->setVisible (keys);
+    keyboard.setMidiChannel (playChannel (false));
+    refreshAll();
+    resized();
+}
+
+void OmniEditor::selectPad (int pad)
+{
+    selectedPad = jlimit (0, kPads - 1, pad);
+    bank = selectedPad / kPadsPerBank;
+    for (int b = 0; b < 4; ++b) bankBtn[b].setToggleState (b == bank, dontSendNotification);
+    selectedPadZone = 0;
+    refreshAll();
+}
+
+void OmniEditor::selectKeyZone (int z)
+{
+    selectedKeyZone = z;
+    refreshAll();
+}
+
+const std::vector<Zone>& OmniEditor::currentZones() const
+{
+    return showingKeys ? shownInst->keys.zones : shownInst->pads[selectedPad].zones;
+}
+
+void OmniEditor::refreshAll()
+{
+    shownInst = proc.getInstrument();
+    const auto& p = shownInst->pads[selectedPad];
+    padTitle.setText (p.name.isNotEmpty() ? p.name : "Pad " + String::charToString ((juce_wchar) "ABCD"[bank]) + String (selectedPad % kPadsPerBank + 1), dontSendNotification);
+    padNote.setSelectedId (p.note + 1, dontSendNotification);
+    chokeBox.setSelectedId (p.chokeGroup + 1, dontSendNotification);
+    oneShot.setToggleState (p.oneShot, dontSendNotification);
+    keysTitle.setText (shownInst->keys.name.isNotEmpty() ? shownInst->keys.name + "  (" + String ((int) shownInst->keys.zones.size()) + " zones)" : String ("Keys"),
+                       dontSendNotification);
+    const auto& zs = currentZones();
+    int& sel = showingKeys ? selectedKeyZone : selectedPadZone;
+    sel = zs.empty() ? -1 : jlimit (0, (int) zs.size() - 1, sel);
+    zoneList.updateContent();
+    if (sel >= 0) zoneList.selectRow (sel, false, true); else zoneList.deselectAllRows();
+    padZoneEditor.refresh();
+    keyZoneEditor.refresh();
+    padVoicing.refresh();
+    keyVoicing.refresh();
+    removeZoneBtn.setEnabled (sel >= 0);
+    for (auto& pb : padButtons) pb->repaint();
+    zoneMap.repaint();
+}
+
+int OmniEditor::getNumRows() { return (int) currentZones().size(); }
+
+void OmniEditor::paintListBoxItem (int row, Graphics& g, int w, int h, bool selected)
+{
+    const auto& zs = currentZones();
+    if (row < 0 || row >= (int) zs.size()) return;
+    const auto& z = zs[(size_t) row];
+    if (selected) g.fillAll (lnf.accent.withAlpha (0.3f));
+    else if (row % 2) g.fillAll (Colours::white.withAlpha (0.02f));
+    g.setFont (FontOptions (12.5f));
+    g.setColour (look::text);
+    g.drawText (z.sample ? z.sample->file.getFileNameWithoutExtension() : String ("?"), 6, 0, w - 200, h, Justification::centredLeft, true);
+    g.setColour (look::textDim);
+    String info = "vel " + String (z.loVel) + "-" + String (z.hiVel);
+    if (showingKeys) info = noteName (z.loKey) + "-" + noteName (z.hiKey) + " root " + noteName (z.root) + "  " + info;
+    if (z.rrPos > 0) info << "  RR " << z.rrPos;
+    g.drawText (info, w - 200, 0, 194, h, Justification::centredRight);
+}
+
+void OmniEditor::selectedRowsChanged (int row)
+{
+    if (row < 0) return;
+    int& sel = showingKeys ? selectedKeyZone : selectedPadZone;
+    if (sel == row) return;
+    sel = row;
+    padZoneEditor.refresh();
+    keyZoneEditor.refresh();
+    zoneMap.repaint();
+}
+
+void OmniEditor::deleteKeyPressed (int row)
+{
+    if (row < 0) return;
+    const bool keys = showingKeys;
+    const int pad = selectedPad;
+    proc.edit ([&] (Instrument& in)
+    {
+        auto& zs = keys ? in.keys.zones : in.pads[pad].zones;
+        if (row < (int) zs.size()) zs.erase (zs.begin() + row);
+    });
+    refreshAll();
+}
+
+void OmniEditor::timerCallback()
+{
+    auto inst = proc.getInstrument();
+    for (auto& pb : padButtons)
+    {
+        const auto hits = proc.engine.padHits[pb->padIndex()].load();
+        if (hits != pb->lastHits) { pb->lastHits = hits; pb->flash = 1.0f; }
+        if (pb->flash > 0.0f) { pb->flash = jmax (0.0f, pb->flash - 0.12f); pb->repaint(); }
+    }
+    voices.setText (String (proc.voiceCount.load()) + " voices", dontSendNotification);
+}
+
+void OmniEditor::paint (Graphics& g) { g.fillAll (look::bg); }
+
+void OmniEditor::resized()
+{
+    auto r = getLocalBounds().reduced (10);
+    auto top = r.removeFromTop (48);
+    logo.setBounds (top.removeFromLeft (170));
+    padsTab.setBounds (top.removeFromLeft (80).reduced (0, 9)); top.removeFromLeft (4);
+    keysTab.setBounds (top.removeFromLeft (80).reduced (0, 9)); top.removeFromLeft (16);
+    voices.setBounds (top.removeFromLeft (90));
+    masterKnob.setBounds (top.removeFromRight (60)); top.removeFromRight (12);
+    saveKitBtn.setBounds (top.removeFromRight (80).reduced (0, 9)); top.removeFromRight (4);
+    loadKitBtn.setBounds (top.removeFromRight (80).reduced (0, 9)); top.removeFromRight (16);
+    keysCh.setBounds (top.removeFromRight (80).reduced (0, 10)); keysChLabel.setBounds (top.removeFromRight (70)); top.removeFromRight (6);
+    padsCh.setBounds (top.removeFromRight (80).reduced (0, 10)); padsChLabel.setBounds (top.removeFromRight (70));
+    r.removeFromTop (6);
+    if (showingKeys) layoutKeys (r); else layoutPads (r);
+}
+
+void OmniEditor::layoutPads (Rectangle<int> r)
+{
+    auto left = r.removeFromLeft (jmin (520, r.getWidth() / 2));
+    auto banks = left.removeFromTop (30);
+    for (auto& b : bankBtn) { b.setBounds (banks.removeFromLeft (44)); banks.removeFromLeft (4); }
+    left.removeFromTop (6);
+    auto drop = left.removeFromBottom (26);
+    dropLabel.setBounds (drop.removeFromLeft (140));
+    dropModeBox.setBounds (drop);
+    left.removeFromBottom (6);
+    const int side = jmin (left.getWidth(), left.getHeight()) / 4;
+    auto grid = left.withSizeKeepingCentre (side * 4, side * 4).withY (left.getY());
+    for (int i = 0; i < kPadsPerBank; ++i)
+    {
+        // Row 1 at the bottom, like hardware pads.
+        const int col = i % 4, row = 3 - i / 4;
+        padButtons[i]->setBounds (grid.getX() + col * side, grid.getY() + row * side, side, side);
+    }
+
+    r.removeFromLeft (12);
+    auto head = r.removeFromTop (28);
+    padTitle.setBounds (head.removeFromLeft (head.getWidth() / 2));
+    oneShot.setBounds (head.removeFromRight (90));
+    auto row2 = r.removeFromTop (26);
+    r.removeFromTop (6);
+    padNoteLabel.setBounds (row2.removeFromLeft (64)); padNote.setBounds (row2.removeFromLeft (120)); row2.removeFromLeft (10);
+    chokeLabel.setBounds (row2.removeFromLeft (44)); chokeBox.setBounds (row2.removeFromLeft (100));
+    auto voicing = r.removeFromBottom (jmin (230, r.getHeight() / 2));
+    padVoicing.setBounds (voicing);
+    r.removeFromBottom (6);
+    auto listCol = r.removeFromLeft (r.getWidth() / 2);
+    auto btns = listCol.removeFromBottom (26);
+    addToPadBtn.setBounds (btns.removeFromLeft (90)); btns.removeFromLeft (4);
+    removeZoneBtn.setBounds (btns.removeFromLeft (70)); btns.removeFromLeft (4);
+    clearPadBtn.setBounds (btns);
+    listCol.removeFromBottom (4);
+    auto remap = listCol.removeFromBottom (26);
+    remapBtn.setBounds (remap);
+    listCol.removeFromBottom (4);
+    zoneList.setBounds (listCol);
+    r.removeFromLeft (10);
+    padZoneEditor.setBounds (r);
+}
+
+void OmniEditor::layoutKeys (Rectangle<int> r)
+{
+    auto head = r.removeFromTop (28);
+    keysTitle.setBounds (head.removeFromLeft (head.getWidth() / 3));
+    clearKeysBtn.setBounds (head.removeFromRight (90)); head.removeFromRight (4);
+    saveSfzBtn.setBounds (head.removeFromRight (110)); head.removeFromRight (4);
+    addKeysBtn.setBounds (head.removeFromRight (110)); head.removeFromRight (4);
+    loadInstBtn.setBounds (head.removeFromRight (190));
+    r.removeFromTop (6);
+    auto map = r.removeFromTop (jmax (160, r.getHeight() / 3));
+    zoneMap.setBounds (map);
+    r.removeFromTop (4);
+    keyboard.setBounds (r.removeFromTop (70));
+    keyboard.setKeyWidth (jmax (8.0f, keyboard.getWidth() / 52.0f));
+    r.removeFromTop (8);
+    auto bottom = r;
+    keyVoicing.setBounds (bottom.removeFromRight (bottom.getWidth() * 5 / 11));
+    bottom.removeFromRight (10);
+    auto listCol = bottom.removeFromLeft (bottom.getWidth() / 2);
+    removeZoneBtn.setBounds (listCol.removeFromBottom (26).removeFromLeft (90));
+    listCol.removeFromBottom (4);
+    zoneList.setBounds (listCol);
+    bottom.removeFromLeft (10);
+    keyZoneEditor.setBounds (bottom);
+}
