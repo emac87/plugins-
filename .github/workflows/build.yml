@@ -52,20 +52,24 @@ jobs:
           if-no-files-found: ignore
 
   ios:
-    name: iOS (AUv3 inside the app, unsigned compile check)
+    name: iOS ${{ matrix.plugin }} (AUv3 inside the app, unsigned compile check)
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { plugin: ContourEQ,   opt: BUILD_CONTOUR_EQ }
+          - { plugin: CaptureRack, opt: BUILD_CAPTURE_RACK }
+          - { plugin: Omnisampler, opt: BUILD_OMNISAMPLER }
     steps:
       - uses: actions/checkout@v4
+      # One plug-in per job (as tools/ship_ios.sh does), so each only downloads what it needs.
       - name: Configure
-        run: cmake -S . -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+        run: >
+          cmake -S . -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+          -DBUILD_CONTOUR_EQ=OFF -DBUILD_CAPTURE_RACK=OFF -DBUILD_OMNISAMPLER=OFF -D${{ matrix.opt }}=ON
       - name: Build
-        run: |
-          set -e
-          for t in ContourEQ CaptureRack Omnisampler; do
-            echo "::group::$t"
-            xcodebuild -project build-ios/EvanPlugins.xcodeproj -target ${t}_Standalone -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO -quiet
-            echo "::endgroup::"
-          done
+        run: xcodebuild -project build-ios/EvanPlugins.xcodeproj -target ${{ matrix.plugin }}_Standalone -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO -quiet
 
   windows:
     name: Windows (VST3, Standalone)
