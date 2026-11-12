@@ -33,7 +33,8 @@ public:
 
     // ---- message thread ----
     juce::AudioProcessorValueTreeState apvts;
-    juce::MidiKeyboardState keyboardState;
+    juce::MidiKeyboardState keyboardState;   // on-screen keyboard (Keys only); also lights keys played over MIDI
+    juce::MidiKeyboardState padState;        // on-screen pads (Pads only)
     omni::SampleCache cache;
     omni::Engine engine;
 
@@ -62,6 +63,7 @@ private:
     std::vector<std::pair<omni::InstrumentPtr, juce::uint32>> graveyard;
     juce::CriticalSection graveLock;
     juce::SmoothedValue<float> master { 1.0f };
+    juce::MidiBuffer localPads, localKeys;   // taps on the on-screen pads / keyboard for this block
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OmniProcessor)
 };

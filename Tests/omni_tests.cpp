@@ -139,6 +139,72 @@ int main (int argc, char** argv)
         CHECK (r > 0.05, "pads play on channel 10");
     }
 
+    // Pads and Keys live on separate MIDI channels by default and never trigger each other.
+    {
+        CHECK (p.padsChannel() == 10 && p.keysChannel() == 1, "defaults: Pads on channel 10, Keys on channel 1");
+        // A key zone on the kick's note (36), so both sections could answer the same note.
+        p.loadFilesToKeys ({ c4 }, true);
+        p.edit ([] (Instrument& in) { for (auto& z : in.keys.zones) { z.loKey = 0; z.hiKey = 127; z.root = 36; } });
+        auto setCh = [&p] (const char* id, int ch) { auto* par = p.apvts.getParameter (id); par->setValueNotifyingHost (par->convertTo0to1 ((float) ch)); };
+        auto voicesAfter = [&p] (std::function<void (juce::MidiBuffer&)> fill)
+        {
+            juce::MidiBuffer off; off.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+            juce::AudioBuffer<float> quiet (2, 22050); p.processBlock (quiet, off);
+            juce::MidiBuffer m; fill (m);
+            juce::AudioBuffer<float> b (2, 256); p.processBlock (b, m);
+            return std::pair<int, int> { p.engine.activeVoicesFrom (true), p.engine.activeVoicesFrom (false) };
+        };
+        auto ctl = [&] (int ch) { return voicesAfter ([ch] (juce::MidiBuffer& m) { m.addEvent (juce::MidiMessage::noteOn (ch, 36, (juce::uint8) 100), 0); }); };
+
+        auto a = ctl (10), b = ctl (1), c = ctl (5);
+        std::printf ("    controller note 36: ch10 pads %d keys %d | ch1 pads %d keys %d | ch5 pads %d keys %d\n", a.first, a.second, b.first, b.second, c.first, c.second);
+        CHECK (a.first > 0 && a.second == 0, "controller on the Pads channel plays the pad only");
+        CHECK (b.first == 0 && b.second > 0, "controller on the Keys channel plays the key only");
+        CHECK (c.first == 0 && c.second == 0, "other channels play nothing");
+
+        auto tapPad = voicesAfter ([&p] (juce::MidiBuffer&) { p.padState.noteOn (10, 36, 0.8f); });
+        auto tapKey = voicesAfter ([&p] (juce::MidiBuffer&) { p.keyboardState.noteOn (1, 36, 0.8f); });
+        CHECK (tapPad.first > 0 && tapPad.second == 0, "tapping an on-screen pad plays the pad only");
+        CHECK (tapKey.first == 0 && tapKey.second > 0, "playing the on-screen keyboard plays the key only");
+
+        // Even with both sections on "Any", the on-screen pads and keyboard stay separate.
+        setCh ("padsch", 0); setCh ("keysch", 0);
+        auto anyPad = voicesAfter ([&p] (juce::MidiBuffer&) { p.padState.noteOn (10, 36, 0.8f); });
+        auto anyKey = voicesAfter ([&p] (juce::MidiBuffer&) { p.keyboardState.noteOn (1, 36, 0.8f); });
+        auto anyCtl = ctl (3);
+        CHECK (anyPad.first > 0 && anyPad.second == 0 && anyKey.first == 0 && anyKey.second > 0, "on-screen pads and keyboard stay separate on Any/Any");
+        CHECK (anyCtl.first > 0 && anyCtl.second > 0, "Any/Any still lets a controller play both, if the user picks that");
+        // One section on "Any" leaves the other section's channel alone.
+        setCh ("padsch", 0); setCh ("keysch", 2);
+        auto mix = ctl (2);
+        CHECK (mix.first == 0 && mix.second > 0, "Pads on Any skip the Keys channel");
+
+        // Old sessions (both on Any, the old default) move to the new defaults; a deliberate choice is kept.
+        juce::MemoryBlock mb; p.getStateInformation (mb);
+        auto xml = juce::AudioProcessor::getXmlFromBinary (mb.getData(), (int) mb.getSize());
+        auto asOld = [&xml] (int pads, int keys)
+        {
+            juce::XmlElement x (*xml);
+            x.removeAttribute ("stateVersion");
+            for (auto* e : x.getChildWithTagNameIterator ("PARAM"))
+            {
+                if (e->getStringAttribute ("id") == "padsch") e->setAttribute ("value", (double) pads);
+                if (e->getStringAttribute ("id") == "keysch") e->setAttribute ("value", (double) keys);
+            }
+            juce::MemoryBlock out; juce::AudioProcessor::copyXmlToBinary (x, out); return out;
+        };
+        { OmniProcessor q; auto o = asOld (0, 0); q.setStateInformation (o.getData(), (int) o.getSize());
+          CHECK (q.padsChannel() == 10 && q.keysChannel() == 1, "old Any/Any sessions open on 10 and 1"); }
+        { OmniProcessor q; auto o = asOld (0, 3); q.setStateInformation (o.getData(), (int) o.getSize());
+          CHECK (q.padsChannel() == 0 && q.keysChannel() == 3, "old sessions with a chosen channel are left alone"); }
+        { OmniProcessor q; q.setStateInformation (mb.getData(), (int) mb.getSize());
+          CHECK (q.padsChannel() == 0 && q.keysChannel() == 2, "new sessions keep exactly what was set, Any included"); }
+        setCh ("padsch", 10); setCh ("keysch", 1);
+        juce::MidiBuffer off; off.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+        juce::AudioBuffer<float> quiet (2, 22050); p.processBlock (quiet, off);
+        p.edit ([] (Instrument& in) { in.keys.zones.clear(); });
+    }
+
     // Kit round trip.
     {
         auto kit = dir.getChildFile ("kit.omni");
@@ -182,6 +248,8 @@ int main (int argc, char** argv)
     snapshot (p, out.getChildFile ("omni-phone-keys.png"), compact (750, 350, true, "Samples"));
     snapshot (p, out.getChildFile ("omni-phone-keys-edit.png"), compact (750, 350, true, "Edit"));
     snapshot (p, out.getChildFile ("omni-phone-keys-sound.png"), compact (750, 350, true, "Sound"));
+    snapshot (p, out.getChildFile ("omni-portrait-pads.png"), compact (390, 760, false, "Samples"));
+    snapshot (p, out.getChildFile ("omni-portrait-keys.png"), compact (390, 760, true, "Samples"));
     snapshot (p, out.getChildFile ("omni-tall-pads.png"), compact (800, 1100, false, "Samples"));
     snapshot (p, out.getChildFile ("omni-tall-keys.png"), compact (800, 1100, true, "Sound"));
     std::printf (failures ? "FAILURES: %d\n" : "all passed\n", failures);

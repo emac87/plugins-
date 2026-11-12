@@ -57,15 +57,25 @@ namespace omni
 
         void prepare (double sr);
         void setInstrument (InstrumentPtr p) { inst = std::move (p); }
+        // MIDI from a controller or the host: the channel decides whether Pads, Keys or both hear it.
         void handleMidi (const juce::MidiMessage&, int padsChannel, int keysChannel);
+        // Notes from the on-screen pads (pads = true) or the on-screen keyboard: that section only.
+        void handleLocal (const juce::MidiMessage&, bool pads);
+        // Which sections a channel reaches (0 = "Any"). A section on "Any" leaves the other section's own channel alone.
+        static void route (int ch, int padsChannel, int keysChannel, bool& toPads, bool& toKeys) noexcept
+        {
+            toPads = ch == padsChannel || (padsChannel == 0 && (keysChannel == 0 || ch != keysChannel));
+            toKeys = ch == keysChannel || (keysChannel == 0 && (padsChannel == 0 || ch != padsChannel));
+        }
         void render (juce::AudioBuffer<float>& out, int start, int n);
         void allNotesOff();
         int activeVoices() const;
+        int activeVoicesFrom (bool pads) const { int n = 0; for (auto& v : voices) if (v.active && ! v.fading && v.fromPad == pads) ++n; return n; }
         std::atomic<uint32_t> padHits[kPads] {};   // for the editor's pad flashes
 
     private:
-        void noteOn (int ch, int note, int vel, int padsChannel, int keysChannel);
-        void noteOff (int ch, int note);
+        void noteOn (int ch, int note, int vel, bool toPads, bool toKeys);
+        void noteOff (int ch, int note, bool pads, bool keys);
         const Zone* pickZone (const std::vector<Zone>& zones, int note, int vel, bool keys, RRMode mode, int counterIndex);
         void startVoice (const Zone&, const Voicing&, int note, int vel, int ch, bool fromPad, int padIndex, int choke, bool oneShot);
 

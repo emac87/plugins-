@@ -4,6 +4,10 @@
 using namespace juce;
 using namespace omni;
 
+// Pads and Keys start on their own channels so one note never plays both (10 is the usual drum channel).
+static constexpr int kDefaultPadsChannel = 10, kDefaultKeysChannel = 1;
+static constexpr int kStateVersion = 2;   // 2: separate Pads/Keys channels by default
+
 AudioProcessorValueTreeState::ParameterLayout OmniProcessor::createLayout()
 {
     AudioProcessorValueTreeState::ParameterLayout l;
@@ -11,8 +15,8 @@ AudioProcessorValueTreeState::ParameterLayout OmniProcessor::createLayout()
     for (int i = 1; i <= 16; ++i) chans.add ("Ch " + String (i));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "master", 1 }, "Master", NormalisableRange<float> (-48, 12, 0.1f), 0.0f,
            AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })));
-    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "padsch", 1 }, "Pads MIDI Channel", chans, 0));
-    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "keysch", 1 }, "Keys MIDI Channel", chans, 0));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "padsch", 1 }, "Pads MIDI Channel", chans, kDefaultPadsChannel));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "keysch", 1 }, "Keys MIDI Channel", chans, kDefaultKeysChannel));
     return l;
 }
 
@@ -37,6 +41,9 @@ void OmniProcessor::prepareToPlay (double sr, int)
     engine.prepare (sr);
     master.reset (sr, 0.05);
     keyboardState.reset();
+    padState.reset();
+    localPads.ensureSize (2048);
+    localKeys.ensureSize (2048);
 }
 
 void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
@@ -48,14 +55,29 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
         GenericScopedTryLock<SpinLock> lock (instLock);
         if (lock.isLocked()) engine.setInstrument (current);
     }
-    keyboardState.processNextMidiBuffer (midi, 0, n, true);
     const int padsCh = padsChannel(), keysCh = keysChannel();
+
+    // On-screen pads and keyboard go straight to their own section, whatever the channel settings are.
+    localPads.clear(); localKeys.clear();
+    padState.processNextMidiBuffer (localPads, 0, n, true);
+    keyboardState.processNextMidiBuffer (localKeys, 0, n, true);
+    for (const auto meta : localPads) engine.handleLocal (meta.getMessage(), true);
+    for (const auto meta : localKeys) engine.handleLocal (meta.getMessage(), false);
+
+    // MIDI from a controller or the host is split by channel.
     int pos = 0;
     for (const auto meta : midi)
     {
         const int at = jlimit (0, n, meta.samplePosition);
         if (at > pos) { engine.render (buffer, pos, at - pos); pos = at; }
-        engine.handleMidi (meta.getMessage(), padsCh, keysCh);
+        const auto msg = meta.getMessage();
+        engine.handleMidi (msg, padsCh, keysCh);
+        if (msg.isNoteOnOrOff())
+        {
+            bool toPads, toKeys;
+            Engine::route (msg.getChannel(), padsCh, keysCh, toPads, toKeys);
+            if (toKeys) keyboardState.processNextMidiEvent (msg);   // light the on-screen key
+        }
     }
     if (pos < n) engine.render (buffer, pos, n - pos);
 
@@ -180,6 +202,7 @@ void OmniProcessor::getStateInformation (MemoryBlock& dest)
 {
     auto state = apvts.copyState();
     auto xml = state.createXml();
+    xml->setAttribute ("stateVersion", kStateVersion);
     xml->addChildElement (instrumentToXml (*current).release());
     copyXmlToBinary (*xml, dest);
 }
@@ -194,6 +217,23 @@ void OmniProcessor::setStateInformation (const void* data, int size)
         replaceInstrument (instrumentFromXml (*inst, cache, missing));
         xml->removeChildElement (inst, true);
     }
+    // Sessions saved before Pads and Keys had separate channels left both on "Any" (the old default),
+    // which made one note play both. Move those to the new defaults; anything the user chose stays.
+    if (xml->getIntAttribute ("stateVersion", 1) < 2)
+    {
+        XmlElement* pads = nullptr; XmlElement* keys = nullptr;
+        for (auto* e : xml->getChildWithTagNameIterator ("PARAM"))
+        {
+            if (e->getStringAttribute ("id") == "padsch") pads = e;
+            if (e->getStringAttribute ("id") == "keysch") keys = e;
+        }
+        if (pads != nullptr && keys != nullptr && pads->getDoubleAttribute ("value") < 0.5 && keys->getDoubleAttribute ("value") < 0.5)
+        {
+            pads->setAttribute ("value", (double) kDefaultPadsChannel);
+            keys->setAttribute ("value", (double) kDefaultKeysChannel);
+        }
+    }
+    xml->removeAttribute ("stateVersion");
     apvts.replaceState (ValueTree::fromXml (*xml));
 }
 

@@ -263,13 +263,13 @@ void PadButton::mouseDown (const MouseEvent&)
    #if JUCE_IOS
     if (p.zones.empty()) { ed.browsePadSamples (padIndex()); return; }   // no drag and drop on iOS: tap an empty pad to fill it
    #endif
-    ed.proc.keyboardState.noteOn (ed.playChannel (true), p.note, 0.8f);
+    ed.proc.padState.noteOn (ed.playChannel (true), p.note, 0.8f);
 }
 
 void PadButton::mouseUp (const MouseEvent&)
 {
     const auto& p = ed.proc.getInstrument()->pads[padIndex()];
-    ed.proc.keyboardState.noteOff (ed.playChannel (true), p.note, 0.0f);
+    ed.proc.padState.noteOff (ed.playChannel (true), p.note, 0.0f);
 }
 
 void PadButton::filesDropped (const StringArray& files, int, int)
@@ -392,6 +392,9 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     }
     aPadsCh = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "padsch", padsCh);
     aKeysCh = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "keysch", keysCh);
+    keysCh.onChange = [this] { keyboard.setMidiChannel (playChannel (false)); };
+    padsCh.setTooltip ("MIDI channel the pads answer to");
+    keysCh.setTooltip ("MIDI channel the keys answer to");
     for (auto* l : { &padsChLabel, &keysChLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); l->setJustificationType (Justification::centredRight); }
 
     loadKitBtn.onClick = [this] { browseKit(); };
@@ -550,7 +553,7 @@ void OmniEditor::applyVisibility()
     show ({ &keyVoicing }, keys && sound);
     show ({ &zoneList, &removeZoneBtn }, list);
     show ({ &detailBtn[0], &detailBtn[1], &detailBtn[2] }, c);
-    show ({ &voices, &padsCh, &keysCh, &padsChLabel, &keysChLabel }, ! c);
+    show ({ &voices }, ! c);   // the MIDI channel pickers stay visible on every screen size
     zoneList.setRowHeight (c ? 30 : 22);
 }
 
@@ -888,14 +891,27 @@ void OmniEditor::resized()
     if (c)
     {
         auto top = r.removeFromTop (40);
-        logo.setVisible (r.getWidth() >= 520);
+        masterKnob.setVisible (r.getWidth() >= 420);
+        // The MIDI channel pickers sit in the top bar when they fit (phone on its side, iPad), dropping
+        // the logo first if that makes the room; on a narrow screen they get a row of their own.
+        const int chNeed = 280;
+        const int fixedW = 64 + 4 + 64 + 76 + 4 + 76 + (masterKnob.isVisible() ? 54 : 0) + 16;
+        const bool chInline = r.getWidth() - fixedW >= chNeed;
+        logo.setVisible (r.getWidth() >= 520 && (! chInline || r.getWidth() - fixedW - 132 >= chNeed));
         if (logo.isVisible()) logo.setBounds (top.removeFromLeft (132));
         padsTab.setBounds (top.removeFromLeft (64).reduced (0, 3)); top.removeFromLeft (4);
         keysTab.setBounds (top.removeFromLeft (64).reduced (0, 3));
-        masterKnob.setVisible (r.getWidth() >= 420);
         if (masterKnob.isVisible()) { masterKnob.setBounds (top.removeFromRight (48)); top.removeFromRight (6); }
         saveKitBtn.setBounds (top.removeFromRight (76).reduced (0, 3)); top.removeFromRight (4);
         loadKitBtn.setBounds (top.removeFromRight (76).reduced (0, 3));
+        top.removeFromRight (8); top.removeFromLeft (8);
+        auto chRow = top;
+        if (! chInline) { r.removeFromTop (4); chRow = r.removeFromTop (32); }
+        chRow = chRow.withSizeKeepingCentre (chRow.getWidth(), 32);
+        auto padsHalf = chRow.removeFromLeft (chRow.getWidth() / 2), keysHalf = chRow;
+        keysHalf.removeFromLeft (6);
+        padsChLabel.setBounds (padsHalf.removeFromLeft (60)); padsHalf.removeFromLeft (4); padsCh.setBounds (padsHalf.removeFromLeft (jmin (96, padsHalf.getWidth())).reduced (0, 1));
+        keysChLabel.setBounds (keysHalf.removeFromLeft (60)); keysHalf.removeFromLeft (4); keysCh.setBounds (keysHalf.removeFromLeft (jmin (96, keysHalf.getWidth())).reduced (0, 1));
         r.removeFromTop (6);
         if (showingKeys) layoutKeysCompact (r); else layoutPadsCompact (r);
         return;

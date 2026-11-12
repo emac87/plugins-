@@ -11,9 +11,20 @@ namespace omni
 
     void Engine::handleMidi (const juce::MidiMessage& m, int padsCh, int keysCh)
     {
-        if (m.isNoteOn()) noteOn (m.getChannel(), m.getNoteNumber(), m.getVelocity(), padsCh, keysCh);
-        else if (m.isNoteOff()) noteOff (m.getChannel(), m.getNoteNumber());
+        if (m.isNoteOn() || m.isNoteOff())
+        {
+            bool toPads, toKeys;
+            route (m.getChannel(), padsCh, keysCh, toPads, toKeys);
+            if (m.isNoteOn()) noteOn (m.getChannel(), m.getNoteNumber(), m.getVelocity(), toPads, toKeys);
+            else              noteOff (m.getChannel(), m.getNoteNumber(), toPads, toKeys);
+        }
         else if (m.isAllNotesOff() || m.isAllSoundOff()) allNotesOff();
+    }
+
+    void Engine::handleLocal (const juce::MidiMessage& m, bool pads)
+    {
+        if (m.isNoteOn())       noteOn (m.getChannel(), m.getNoteNumber(), m.getVelocity(), pads, ! pads);
+        else if (m.isNoteOff()) noteOff (m.getChannel(), m.getNoteNumber(), pads, ! pads);
     }
 
     void Engine::allNotesOff()
@@ -66,10 +77,10 @@ namespace omni
         return candidates.front();
     }
 
-    void Engine::noteOn (int ch, int note, int vel, int padsCh, int keysCh)
+    void Engine::noteOn (int ch, int note, int vel, bool toPads, bool toKeys)
     {
         if (! inst) return;
-        if (padsCh == 0 || ch == padsCh)
+        if (toPads)
             for (int i = 0; i < kPads; ++i)
             {
                 const auto& p = inst->pads[i];
@@ -83,8 +94,7 @@ namespace omni
                 for (int k = 0; k < nz; ++k) startVoice (*zs[k], p.voicing, note, vel, ch, true, i, p.chokeGroup, p.oneShot);
                 padHits[i].fetch_add (1);
             }
-        // Keys on "Any" leave the pads' own channel to the pads.
-        if ((keysCh == 0 && (padsCh == 0 || ch != padsCh)) || ch == keysCh)
+        if (toKeys)
         {
             const auto& k = inst->keys;
             if (! k.zones.empty() && pickZone (k.zones, note, vel, true, k.voicing.rr, kPads + note) != nullptr)
@@ -96,10 +106,10 @@ namespace omni
         }
     }
 
-    void Engine::noteOff (int ch, int note)
+    void Engine::noteOff (int ch, int note, bool pads, bool keys)
     {
         for (auto& v : voices)
-            if (v.active && ! v.released && ! v.oneShot && v.note == note && v.channel == ch)
+            if (v.active && ! v.released && ! v.oneShot && v.note == note && v.channel == ch && (v.fromPad ? pads : keys))
             {
                 v.env.noteOff();
                 v.released = true;
