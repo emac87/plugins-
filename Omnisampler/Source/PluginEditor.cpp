@@ -861,6 +861,12 @@ void OmniEditor::timerCallback()
         if (pb->flash > 0.0f) { pb->flash = jmax (0.0f, pb->flash - 0.12f); pb->repaint(); }
     }
     voices.setText (String (proc.voiceCount.load()) + " voices", dontSendNotification);
+   #if JUCE_IOS
+    // The notch changes sides when the phone is turned over; lay out again when the margins change.
+    if (proc.wrapperType == AudioProcessor::wrapperType_Standalone)
+        if (auto* d = Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            if (d->safeAreaInsets != lastSafeInsets) resized();
+   #endif
 }
 
 void OmniEditor::paint (Graphics& g) { g.fillAll (look::bg); }
@@ -874,7 +880,10 @@ void OmniEditor::resized()
     // The standalone app fills the screen, so keep clear of the notch and the home bar.
     if (proc.wrapperType == AudioProcessor::wrapperType_Standalone)
         if (auto* d = Desktop::getInstance().getDisplays().getPrimaryDisplay())
-            r = d->safeAreaInsets.subtractedFrom (getLocalBounds()).reduced (6);
+        {
+            lastSafeInsets = d->safeAreaInsets;
+            r = lastSafeInsets.subtractedFrom (getLocalBounds()).reduced (6);
+        }
    #endif
     if (c)
     {

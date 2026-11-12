@@ -90,6 +90,7 @@ public:
     ~OmniEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    void parentHierarchyChanged() override { resized(); }
 
     OmniProcessor& proc;
     look::PluginLook lnf { juce::Colour (0xff8f7bff) };
@@ -165,6 +166,7 @@ private:
     juce::TextButton detailBtn[3] { juce::TextButton ("Samples"), juce::TextButton ("Edit"), juce::TextButton ("Sound") };
     int detail = 0;          // which panel a small screen shows
     bool wasCompact = false;
+    juce::BorderSize<int> lastSafeInsets;   // iOS: notch / home bar margins the layout was made for
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OmniEditor)
 };
