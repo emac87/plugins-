@@ -1,7 +1,7 @@
 juce_add_plugin(Omnisampler
     PRODUCT_NAME "Omnisampler"
     COMPANY_NAME "emac87"
-    BUNDLE_ID "com.emac87.omnisampler"
+    BUNDLE_ID "${EVAN_BUNDLE_PREFIX}.omnisampler"
     PLUGIN_MANUFACTURER_CODE Emac
     PLUGIN_CODE Omns
     FORMATS ${PLUGIN_FORMATS}
@@ -12,6 +12,8 @@ juce_add_plugin(Omnisampler
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
     AU_MAIN_TYPE kAudioUnitType_MusicDevice
+    ICON_BIG "${CMAKE_SOURCE_DIR}/Shared/icons/omnisampler.png"
+    ${EVAN_COMMON_OPTIONS}
     VST3_CATEGORIES Instrument Sampler)
 
 target_sources(Omnisampler PRIVATE
@@ -22,3 +24,4 @@ target_sources(Omnisampler PRIVATE
 
 target_compile_definitions(Omnisampler PUBLIC JUCE_USE_CURL=0 JUCE_USE_MP3AUDIOFORMAT=1)
 evan_plugin_defaults(Omnisampler)
+evan_ios_archive(Omnisampler)

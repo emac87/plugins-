@@ -1,7 +1,7 @@
 juce_add_plugin(CaptureRack
     PRODUCT_NAME "Capture Rack"
     COMPANY_NAME "emac87"
-    BUNDLE_ID "com.emac87.capturerack"
+    BUNDLE_ID "${EVAN_BUNDLE_PREFIX}.capturerack"
     PLUGIN_MANUFACTURER_CODE Emac
     PLUGIN_CODE Crak
     FORMATS ${PLUGIN_FORMATS}
@@ -13,6 +13,10 @@ juce_add_plugin(CaptureRack
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     COPY_PLUGIN_AFTER_BUILD FALSE
     AU_MAIN_TYPE kAudioUnitType_Effect
+    ICON_BIG "${CMAKE_SOURCE_DIR}/Shared/icons/capturerack.png"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Capture Rack plays your guitar through the amp captures."
+    ${EVAN_COMMON_OPTIONS}
     VST3_CATEGORIES Fx Distortion)
 
 # NeuralAmpModelerCore (MIT). Built as an OBJECT library and linked straight into each
@@ -34,7 +38,7 @@ target_sources(CaptureRack PRIVATE
     Source/NamSlot.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
-foreach(fmt VST3 Standalone AU)
+foreach(fmt VST3 Standalone AU AUv3)
     if(TARGET CaptureRack_${fmt})
         target_link_libraries(CaptureRack_${fmt} PRIVATE nam_core)
     endif()
@@ -51,3 +55,4 @@ if(MSVC)
     target_compile_options(CaptureRack PRIVATE /bigobj)
 endif()
 evan_plugin_defaults(CaptureRack)
+evan_ios_archive(CaptureRack)
