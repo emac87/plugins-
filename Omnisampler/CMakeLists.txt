@@ -22,6 +22,12 @@ target_sources(Omnisampler PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 
+if(IOS)
+    # iPhone/iPad: the system file picker, with picked files copied into the app's own storage.
+    target_sources(Omnisampler PRIVATE Source/IOSFiles.mm)
+    target_link_libraries(Omnisampler PUBLIC "-framework UniformTypeIdentifiers")
+endif()
+
 target_compile_definitions(Omnisampler PUBLIC JUCE_USE_CURL=0 JUCE_USE_MP3AUDIOFORMAT=1)
 evan_plugin_defaults(Omnisampler)
 evan_ios_archive(Omnisampler)

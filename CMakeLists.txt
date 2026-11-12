@@ -7,6 +7,10 @@ option(BUILD_CONTOUR_EQ   "Build Contour EQ"   ON)
 option(BUILD_CAPTURE_RACK "Build Capture Rack" ON)
 option(BUILD_OMNISAMPLER  "Build Omnisampler"  ON)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    enable_language(OBJCXX)   # Omnisampler's iOS file picker is Objective-C++
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")

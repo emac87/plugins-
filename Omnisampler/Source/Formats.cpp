@@ -536,13 +536,32 @@ namespace omni
         v.filter.cutoff = (float) e.getDoubleAttribute ("cut", v.filter.cutoff); v.filter.resonance = (float) e.getDoubleAttribute ("res", v.filter.resonance);
         v.velSens = (float) e.getDoubleAttribute ("vs", v.velSens); v.rr = (RRMode) e.getIntAttribute ("rr", (int) v.rr);
     }
+    // iOS gives the app a new container folder on every update, so paths inside the container are
+    // stored relative to it ("~app/Documents/...") and resolved again on load.
+    static String storedPath (const File& f)
+    {
+       #if JUCE_IOS
+        const auto home = File::getSpecialLocation (File::userDocumentsDirectory).getParentDirectory();
+        if (f.isAChildOf (home)) return "~app/" + f.getRelativePathFrom (home);
+       #endif
+        return f.getFullPathName();
+    }
+    static File fileFromStoredPath (const String& path)
+    {
+       #if JUCE_IOS
+        if (path.startsWith ("~app/"))
+            return File::getSpecialLocation (File::userDocumentsDirectory).getParentDirectory().getChildFile (path.substring (5));
+       #endif
+        return File::isAbsolutePath (path) ? File (path) : File();
+    }
+
     static void zonesToXml (const std::vector<Zone>& zones, XmlElement& parent)
     {
         for (auto& z : zones)
         {
             if (! z.sample) continue;
             auto* e = parent.createNewChildElement ("Zone");
-            e->setAttribute ("path", z.sample->file.getFullPathName());
+            e->setAttribute ("path", storedPath (z.sample->file));
             e->setAttribute ("lokey", z.loKey); e->setAttribute ("hikey", z.hiKey); e->setAttribute ("root", z.root);
             e->setAttribute ("lovel", z.loVel); e->setAttribute ("hivel", z.hiVel); e->setAttribute ("rr", z.rrPos);
             e->setAttribute ("tune", z.tuneCents); e->setAttribute ("gain", z.gainDb); e->setAttribute ("pan", z.pan);
@@ -556,7 +575,7 @@ namespace omni
         {
             String err;
             Zone z;
-            z.sample = cache.get (File (e->getStringAttribute ("path")), err);
+            z.sample = cache.get (fileFromStoredPath (e->getStringAttribute ("path")), err);
             if (! z.sample) { missing.addIfNotAlreadyThere (e->getStringAttribute ("path")); continue; }
             z.loKey = e->getIntAttribute ("lokey", 0); z.hiKey = e->getIntAttribute ("hikey", 127); z.root = e->getIntAttribute ("root", 60);
             z.loVel = e->getIntAttribute ("lovel", 1); z.hiVel = e->getIntAttribute ("hivel", 127); z.rrPos = e->getIntAttribute ("rr", 0);

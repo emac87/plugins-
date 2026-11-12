@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "IOSFiles.h"
 
 using namespace juce;
 using namespace omni;
@@ -200,12 +201,19 @@ void ZoneEditor::resized()
     auto cols = r;
     const int colW = cols.getWidth() / 2;
     auto left = cols.removeFromLeft (colW).reduced (2, 0), right = cols.reduced (2, 0);
-    auto place = [] (Rectangle<int>& col, Field& f) { auto row = col.removeFromTop (26); f.label.setBounds (row.removeFromLeft (84)); f.slider.setBounds (row); col.removeFromTop (3); };
+    const int rowH = jlimit (18, 26, r.getHeight() / (keys ? 5 : 3) - 3);   // rows shrink a little on small screens
+    auto place = [rowH] (Rectangle<int>& col, Field& f) { auto row = col.removeFromTop (rowH); f.label.setBounds (row.removeFromLeft (84)); f.slider.setBounds (row); col.removeFromTop (3); };
     if (keys) { place (left, root); place (left, loKey); place (left, hiKey); }
     place (left, loVel); place (left, hiVel);
     place (right, rrPos); place (right, tune); place (right, gain);
     if (keys) loop.setBounds (right.removeFromTop (24));
 }
+
+#if JUCE_IOS
+static const char* const emptyPadHint = "tap to load";
+#else
+static const char* const emptyPadHint = "drop samples";
+#endif
 
 // =============================================================================================
 PadButton::PadButton (OmniEditor& e, int s) : ed (e), slot (s) {}
@@ -234,7 +242,7 @@ void PadButton::paint (Graphics& g)
     g.drawText (String::charToString ((juce_wchar) "ABCD"[ed.bank]) + String (slot + 1) + "  " + noteName (p.note), r.reduced (8, 6), Justification::topLeft);
     g.setColour (has ? look::text : look::textDim.withAlpha (0.5f));
     g.setFont (FontOptions (13.0f, Font::bold));
-    g.drawFittedText (has ? p.name : String ("drop samples"), r.reduced (8, 20).toNearestInt(), Justification::centred, 2);
+    g.drawFittedText (has ? p.name : String (emptyPadHint), r.reduced (8, 20).toNearestInt(), Justification::centred, 2);
     if (has)
     {
         int rr = 0;
@@ -252,6 +260,9 @@ void PadButton::mouseDown (const MouseEvent&)
 {
     ed.selectPad (padIndex());
     const auto& p = ed.proc.getInstrument()->pads[padIndex()];
+   #if JUCE_IOS
+    if (p.zones.empty()) { ed.browsePadSamples (padIndex()); return; }   // no drag and drop on iOS: tap an empty pad to fill it
+   #endif
     ed.proc.keyboardState.noteOn (ed.playChannel (true), p.note, 0.8f);
 }
 
@@ -316,10 +327,15 @@ void ZoneMap::paint (Graphics& g)
     {
         g.setColour (look::textDim);
         g.setFont (FontOptions (15.0f));
-        g.drawFittedText ("Drop samples, a folder, an .sfz, .dspreset or .dslibrary here.\n"
+        g.drawFittedText (
+                         #if JUCE_IOS
+                          "Use Load instrument or Add samples above.\n"
+                         #else
+                          "Drop samples, a folder, an .sfz, .dspreset or .dslibrary here.\n"
+                         #endif
                           "Notes are read from file names (C4 = middle C), file metadata, or detected from the audio.\n"
                           "Several samples on the same note become velocity layers by loudness.",
-                          getLocalBounds().reduced (20), Justification::centred, 4);
+                          getLocalBounds().reduced (12), Justification::centred, 4);
     }
     if (hover) { g.setColour (ed.lnf.accent); g.drawRoundedRectangle (r.reduced (1), 6.0f, 2.0f); }
 }
@@ -378,33 +394,8 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     aKeysCh = std::make_unique<AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "keysch", keysCh);
     for (auto* l : { &padsChLabel, &keysChLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); l->setJustificationType (Justification::centredRight); }
 
-    loadKitBtn.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Load kit, SFZ or DecentSampler", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler"),
-                                                 "*.omni;*.sfz;*.dspreset;*.dslibrary");
-        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc)
-        {
-            auto f = fc.getResult();
-            if (! f.existsAsFile()) return;
-            const auto msg = f.hasFileExtension ("omni") ? proc.loadKit (f) : proc.loadInstrumentFile (f);
-            if (! f.hasFileExtension ("omni")) setView (true);
-            refreshAll();
-            if (msg.isNotEmpty()) showMessage ("Note", msg);
-        });
-    };
-    saveKitBtn.onClick = [this]
-    {
-        auto dir = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler");
-        dir.createDirectory();
-        chooser = std::make_unique<FileChooser> ("Save kit", dir.getChildFile ("My kit.omni"), "*.omni");
-        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
-        {
-            auto f = fc.getResult();
-            if (f == File()) return;
-            const auto msg = proc.saveKit (f.withFileExtension ("omni"));
-            if (msg.isNotEmpty()) showMessage ("Couldn't save", msg);
-        });
-    };
+    loadKitBtn.onClick = [this] { browseKit(); };
+    saveKitBtn.onClick = [this] { saveKitAs(); };
 
     // ---- pads ----
     for (int b = 0; b < 4; ++b)
@@ -430,18 +421,7 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     dropModeBox.setSelectedId (1, dontSendNotification);
     oneShot.onClick = [this] { const bool v = oneShot.getToggleState(); proc.edit ([&] (Instrument& in) { in.pads[selectedPad].oneShot = v; }); };
     for (auto* l : { &padNoteLabel, &chokeLabel, &dropLabel }) { l->setColour (Label::textColourId, look::textDim); l->setFont (FontOptions (11.0f)); }
-    addToPadBtn.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Add samples to pad", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
-        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
-            [this] (const FileChooser& fc)
-            {
-                if (fc.getResults().isEmpty()) return;
-                const auto msg = proc.loadFilesToPad (selectedPad, fc.getResults(), dropMode());
-                refreshAll();
-                if (msg.isNotEmpty()) showMessage ("Some files didn't load", msg);
-            });
-    };
+    addToPadBtn.onClick = [this] { browsePadSamples (selectedPad); };
     clearPadBtn.onClick = [this] { proc.edit ([this] (Instrument& in) { in.pads[selectedPad].zones.clear(); in.pads[selectedPad].name.clear(); }); refreshAll(); };
     remapBtn.onClick = [this]
     {
@@ -473,40 +453,9 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     keysTitle.setFont (FontOptions (16.0f, Font::bold));
     keyboard.setAvailableRange (21, 108);
     keyboard.setMidiChannel (1);
-    loadInstBtn.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Load instrument", File::getSpecialLocation (File::userDocumentsDirectory), "*.sfz;*.dspreset;*.dslibrary");
-        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc)
-        {
-            if (! fc.getResult().existsAsFile()) return;
-            const auto msg = proc.loadInstrumentFile (fc.getResult());
-            selectKeyZone (0);
-            if (msg.isNotEmpty()) showMessage ("Note", msg);
-        });
-    };
-    addKeysBtn.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Add samples to the keys", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
-        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
-            [this] (const FileChooser& fc)
-            {
-                if (fc.getResults().isEmpty()) return;
-                const auto msg = proc.loadFilesToKeys (fc.getResults(), false);
-                selectKeyZone (0);
-                if (msg.isNotEmpty()) showMessage ("Note", msg);
-            });
-    };
-    saveSfzBtn.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Save keys as SFZ", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler/instrument.sfz"), "*.sfz");
-        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
-        {
-            auto f = fc.getResult();
-            if (f == File()) return;
-            String err;
-            if (! saveSfz (proc.getInstrument()->keys, f.withFileExtension ("sfz"), err)) showMessage ("Couldn't save", err);
-        });
-    };
+    loadInstBtn.onClick = [this] { browseInstrument(); };
+    addKeysBtn.onClick = [this] { browseKeySamples(); };
+    saveSfzBtn.onClick = [this] { saveSfzAs(); };
     clearKeysBtn.onClick = [this] { proc.edit ([] (Instrument& in) { in.keys.zones.clear(); in.keys.name.clear(); }); selectKeyZone (0); };
 
     keyZoneEditor.get = [this]() -> const Zone*
@@ -533,8 +482,25 @@ OmniEditor::OmniEditor (OmniProcessor& p)
                                                        &keyZoneEditor, &padVoicing, &keyVoicing })
         addAndMakeVisible (c);
 
+    // Small screens show one of these three panels at a time (see isCompact).
+    for (int i = 0; i < 3; ++i)
+    {
+        detailBtn[i].setRadioGroupId (3);
+        detailBtn[i].setClickingTogglesState (true);
+        detailBtn[i].onClick = [this, i] { if (detailBtn[i].getToggleState()) { detail = i; applyVisibility(); resized(); } };
+        addChildComponent (detailBtn[i]);
+    }
+    detailBtn[0].setToggleState (true, dontSendNotification);
+
     setResizable (true, true);
+   #if JUCE_IOS
+    setResizeLimits (300, 240, 4000, 4000);   // phones and AUv3 hosts give whatever space they have
+    addToPadBtn.setButtonText ("Load samples...");
+    loadInstBtn.setButtonText ("Load instrument...");
+    saveSfzBtn.setButtonText ("Save SFZ");
+   #else
     setResizeLimits (1000, 700, 2200, 1400);
+   #endif
     setSize (1220, 800);
     padsTab.setToggleState (true, dontSendNotification);
     setView (false);
@@ -560,17 +526,242 @@ void OmniEditor::setView (bool keys)
     showingKeys = keys;
     padsTab.setToggleState (! keys, dontSendNotification);
     keysTab.setToggleState (keys, dontSendNotification);
-    for (auto* c : std::initializer_list<Component*> { &bankBtn[0], &bankBtn[1], &bankBtn[2], &bankBtn[3], &padTitle, &padNote, &chokeBox, &dropModeBox,
-                                                       &oneShot, &padNoteLabel, &chokeLabel, &dropLabel, &addToPadBtn, &clearPadBtn, &remapBtn,
-                                                       &padZoneEditor, &padVoicing })
-        c->setVisible (! keys);
-    for (auto& pb : padButtons) pb->setVisible (! keys);
-    for (auto* c : std::initializer_list<Component*> { &zoneMap, &keyboard, &keysTitle, &loadInstBtn, &addKeysBtn, &saveSfzBtn, &clearKeysBtn,
-                                                       &keyZoneEditor, &keyVoicing })
-        c->setVisible (keys);
+    applyVisibility();
     keyboard.setMidiChannel (playChannel (false));
     refreshAll();
     resized();
+}
+
+bool OmniEditor::isCompact() const { return getWidth() < 900 || getHeight() < 600; }
+
+// Which controls show: the Pads or Keys page, and on small screens only one detail panel.
+void OmniEditor::applyVisibility()
+{
+    const bool keys = showingKeys, c = isCompact();
+    const bool list = ! c || detail == 0, edit = ! c || detail == 1, sound = ! c || detail == 2;
+    auto show = [] (std::initializer_list<Component*> cs, bool v) { for (auto* comp : cs) comp->setVisible (v); };
+    show ({ &bankBtn[0], &bankBtn[1], &bankBtn[2], &bankBtn[3], &padTitle, &addToPadBtn }, ! keys);
+    for (auto& pb : padButtons) pb->setVisible (! keys);
+    show ({ &padNote, &chokeBox, &dropModeBox, &oneShot, &padNoteLabel, &chokeLabel, &dropLabel, &clearPadBtn, &remapBtn }, ! keys && list);
+    show ({ &padZoneEditor }, ! keys && edit);
+    show ({ &padVoicing }, ! keys && sound);
+    show ({ &zoneMap, &keyboard, &keysTitle, &loadInstBtn, &addKeysBtn, &saveSfzBtn, &clearKeysBtn }, keys);
+    show ({ &keyZoneEditor }, keys && edit);
+    show ({ &keyVoicing }, keys && sound);
+    show ({ &zoneList, &removeZoneBtn }, list);
+    show ({ &detailBtn[0], &detailBtn[1], &detailBtn[2] }, c);
+    show ({ &voices, &padsCh, &keysCh, &padsChLabel, &keysChLabel }, ! c);
+    zoneList.setRowHeight (c ? 30 : 22);
+}
+
+// ---- loading and saving -----------------------------------------------------------------------
+// Desktop uses the normal file dialogs. iPhone/iPad goes through omni::ios::pickAndImport, which
+// copies the picked files into the app first (see IOSFiles.h).
+
+void OmniEditor::padFilesChosen (int pad, const Array<File>& files)
+{
+    Array<File> audio;
+    for (auto& f : files)
+    {
+        if (f.isDirectory()) audio.addArray (f.findChildFiles (File::findFiles, false, "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg"));
+        else if (isAudioFile (f)) audio.add (f);
+    }
+    if (audio.isEmpty()) { showMessage ("Nothing to load", "Pick audio files (WAV, AIFF, FLAC, MP3, OGG) for a pad."); return; }
+    const auto msg = proc.loadFilesToPad (pad, audio, dropMode());
+    selectPad (pad);
+    if (msg.isNotEmpty()) showMessage ("Some files didn't load", msg);
+}
+
+void OmniEditor::instrumentChosen (const File& f)
+{
+    if (f == File()) return;
+    if (f.hasFileExtension ("omni"))
+    {
+        const auto msg = proc.loadKit (f);
+        refreshAll();
+        if (msg.isNotEmpty()) showMessage ("Note", msg);
+        return;
+    }
+    if (f.isDirectory())
+    {
+        // A folder: use the instrument file inside it, or map its audio files across the keys.
+        auto found = f.findChildFiles (File::findFiles, true, "*.dspreset;*.sfz");
+        found.sort();
+        if (found.size() > 1)
+        {
+            PopupMenu m;
+            for (int i = 0; i < found.size(); ++i) m.addItem (i + 1, found[i].getRelativePathFrom (f));
+            m.showMenuAsync (PopupMenu::Options().withTargetComponent (showingKeys ? (Component*) &loadInstBtn : (Component*) &loadKitBtn),
+                             [safe = Component::SafePointer<OmniEditor> (this), found] (int r) { if (safe != nullptr && r > 0) safe->instrumentChosen (found[r - 1]); });
+            return;
+        }
+        if (found.size() == 1) { instrumentChosen (found[0]); return; }
+        const auto msg = proc.loadFilesToKeys ({ f }, true);
+        setView (true);
+        selectKeyZone (0);
+        if (msg.isNotEmpty()) showMessage ("Note", msg);
+        return;
+    }
+    if (! isInstrumentFile (f))
+    {
+        showMessage ("Can't open that", f.getFileName() + " isn't a kit or instrument Omnisampler can open yet.\n\n"
+                     "It opens .omni kits, SFZ and DecentSampler (.dspreset, .dslibrary). Kontakt (.nki) isn't supported yet.");
+        return;
+    }
+    auto msg = proc.loadInstrumentFile (f);
+   #if JUCE_IOS
+    if (msg.isNotEmpty() && ! f.hasFileExtension ("dslibrary"))
+        msg << "\n\nAn .sfz or .dspreset needs its sample files next to it. Use Load > Folder and pick the whole instrument folder.";
+   #endif
+    setView (true);
+    selectKeyZone (0);
+    if (msg.isNotEmpty()) showMessage ("Note", msg);
+}
+
+#if JUCE_IOS
+static File kitsDir()
+{
+    auto d = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Kits");
+    d.createDirectory();
+    return d;
+}
+
+// Menu: saved kits, then a file or a folder from the Files app.
+void OmniEditor::showLoadMenu (Component& target, bool withKits)
+{
+    PopupMenu m;
+    Array<File> kits;
+    if (withKits)
+    {
+        kits = kitsDir().findChildFiles (File::findFiles, false, "*.omni");
+        kits.sort();
+        for (int i = 0; i < kits.size(); ++i) m.addItem (100 + i, kits[i].getFileNameWithoutExtension());
+        if (! kits.isEmpty()) m.addSeparator();
+    }
+    m.addItem (1, withKits ? "File (.omni kit, .dslibrary)..." : "File (.dslibrary)...");
+    m.addItem (2, "Folder (SFZ or DecentSampler with its samples)...");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&target),
+                     [safe = Component::SafePointer<OmniEditor> (this), kits] (int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        if (r >= 100) { safe->instrumentChosen (kits[r - 100]); return; }
+        omni::ios::pickAndImport (*safe, r == 2 ? omni::ios::Pick::folder : omni::ios::Pick::files, false,
+                                  [safe] (Array<File> files) { if (safe != nullptr && ! files.isEmpty()) safe->instrumentChosen (files[0]); });
+    });
+}
+
+// Asks for a name, then saves into the app's Documents folder (it shows up in the Files app).
+void OmniEditor::askNameThen (const String& title, const String& initial, std::function<void (String)> then)
+{
+    auto* w = new AlertWindow (title, "Saved in the Files app under On My iPhone > Omnisampler.", MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("name", initial);
+    w->addButton ("Save", 1, KeyPress (KeyPress::returnKey));
+    w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    w->enterModalState (true, ModalCallbackFunction::create ([w, then] (int r)
+    {
+        const auto name = File::createLegalFileName (w->getTextEditorContents ("name").trim());
+        if (r == 1 && name.isNotEmpty()) then (name);
+    }), true);
+}
+#endif
+
+void OmniEditor::browsePadSamples (int pad)
+{
+   #if JUCE_IOS
+    omni::ios::pickAndImport (*this, omni::ios::Pick::files, true,
+                              [safe = Component::SafePointer<OmniEditor> (this), pad] (Array<File> files) { if (safe != nullptr) safe->padFilesChosen (pad, files); });
+   #else
+    chooser = std::make_unique<FileChooser> ("Add samples to pad", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+                          [this, pad] (const FileChooser& fc) { if (! fc.getResults().isEmpty()) padFilesChosen (pad, fc.getResults()); });
+   #endif
+}
+
+void OmniEditor::browseKeySamples()
+{
+    auto loaded = [] (OmniEditor& ed, const Array<File>& files)
+    {
+        const auto msg = ed.proc.loadFilesToKeys (files, false);
+        ed.selectKeyZone (0);
+        if (msg.isNotEmpty()) ed.showMessage ("Note", msg);
+    };
+   #if JUCE_IOS
+    omni::ios::pickAndImport (*this, omni::ios::Pick::files, true,
+                              [safe = Component::SafePointer<OmniEditor> (this), loaded] (Array<File> files) { if (safe != nullptr && ! files.isEmpty()) loaded (*safe, files); });
+   #else
+    chooser = std::make_unique<FileChooser> ("Add samples to the keys", File::getSpecialLocation (File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+    chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectMultipleItems,
+                          [this, loaded] (const FileChooser& fc) { if (! fc.getResults().isEmpty()) loaded (*this, fc.getResults()); });
+   #endif
+}
+
+void OmniEditor::browseInstrument()
+{
+   #if JUCE_IOS
+    showLoadMenu (loadInstBtn, false);
+   #else
+    chooser = std::make_unique<FileChooser> ("Load instrument", File::getSpecialLocation (File::userDocumentsDirectory), "*.sfz;*.dspreset;*.dslibrary");
+    chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
+                          [this] (const FileChooser& fc) { if (fc.getResult().existsAsFile()) instrumentChosen (fc.getResult()); });
+   #endif
+}
+
+void OmniEditor::browseKit()
+{
+   #if JUCE_IOS
+    showLoadMenu (loadKitBtn, true);
+   #else
+    chooser = std::make_unique<FileChooser> ("Load kit, SFZ or DecentSampler", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler"),
+                                             "*.omni;*.sfz;*.dspreset;*.dslibrary");
+    chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
+                          [this] (const FileChooser& fc) { if (fc.getResult().existsAsFile()) instrumentChosen (fc.getResult()); });
+   #endif
+}
+
+void OmniEditor::saveKitAs()
+{
+   #if JUCE_IOS
+    askNameThen ("Save kit", "My kit", [safe = Component::SafePointer<OmniEditor> (this)] (String name)
+    {
+        if (safe == nullptr) return;
+        const auto msg = safe->proc.saveKit (kitsDir().getChildFile (name + ".omni"));
+        if (msg.isNotEmpty()) safe->showMessage ("Couldn't save", msg);
+    });
+   #else
+    auto dir = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler");
+    dir.createDirectory();
+    chooser = std::make_unique<FileChooser> ("Save kit", dir.getChildFile ("My kit.omni"), "*.omni");
+    chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
+    {
+        auto f = fc.getResult();
+        if (f == File()) return;
+        const auto msg = proc.saveKit (f.withFileExtension ("omni"));
+        if (msg.isNotEmpty()) showMessage ("Couldn't save", msg);
+    });
+   #endif
+}
+
+void OmniEditor::saveSfzAs()
+{
+   #if JUCE_IOS
+    const auto initial = shownInst->keys.name.isNotEmpty() ? shownInst->keys.name : String ("instrument");
+    askNameThen ("Save keys as SFZ", initial, [safe = Component::SafePointer<OmniEditor> (this)] (String name)
+    {
+        if (safe == nullptr) return;
+        String err;
+        const auto f = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile (name + ".sfz");
+        if (! saveSfz (safe->proc.getInstrument()->keys, f, err)) safe->showMessage ("Couldn't save", err);
+    });
+   #else
+    chooser = std::make_unique<FileChooser> ("Save keys as SFZ", File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("Omnisampler/instrument.sfz"), "*.sfz");
+    chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting, [this] (const FileChooser& fc)
+    {
+        auto f = fc.getResult();
+        if (f == File()) return;
+        String err;
+        if (! saveSfz (proc.getInstrument()->keys, f.withFileExtension ("sfz"), err)) showMessage ("Couldn't save", err);
+    });
+   #endif
 }
 
 void OmniEditor::selectPad (int pad)
@@ -677,6 +868,31 @@ void OmniEditor::paint (Graphics& g) { g.fillAll (look::bg); }
 void OmniEditor::resized()
 {
     auto r = getLocalBounds().reduced (10);
+    const bool c = isCompact();
+    if (c != wasCompact) { wasCompact = c; applyVisibility(); if (c) keyboard.setLowestVisibleKey (48); }
+   #if JUCE_IOS
+    // The standalone app fills the screen, so keep clear of the notch and the home bar.
+    if (proc.wrapperType == AudioProcessor::wrapperType_Standalone)
+        if (auto* d = Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            r = d->safeAreaInsets.subtractedFrom (getLocalBounds()).reduced (6);
+   #endif
+    if (c)
+    {
+        auto top = r.removeFromTop (40);
+        logo.setVisible (r.getWidth() >= 520);
+        if (logo.isVisible()) logo.setBounds (top.removeFromLeft (132));
+        padsTab.setBounds (top.removeFromLeft (64).reduced (0, 3)); top.removeFromLeft (4);
+        keysTab.setBounds (top.removeFromLeft (64).reduced (0, 3));
+        masterKnob.setVisible (r.getWidth() >= 420);
+        if (masterKnob.isVisible()) { masterKnob.setBounds (top.removeFromRight (48)); top.removeFromRight (6); }
+        saveKitBtn.setBounds (top.removeFromRight (76).reduced (0, 3)); top.removeFromRight (4);
+        loadKitBtn.setBounds (top.removeFromRight (76).reduced (0, 3));
+        r.removeFromTop (6);
+        if (showingKeys) layoutKeysCompact (r); else layoutPadsCompact (r);
+        return;
+    }
+    logo.setVisible (true);
+    masterKnob.setVisible (true);
     auto top = r.removeFromTop (48);
     logo.setBounds (top.removeFromLeft (170));
     padsTab.setBounds (top.removeFromLeft (80).reduced (0, 9)); top.removeFromLeft (4);
@@ -689,6 +905,104 @@ void OmniEditor::resized()
     padsCh.setBounds (top.removeFromRight (80).reduced (0, 10)); padsChLabel.setBounds (top.removeFromRight (70));
     r.removeFromTop (6);
     if (showingKeys) layoutKeys (r); else layoutPads (r);
+}
+
+// Small screens. Wide (phone on its side): pads or key map on the left, one detail panel on the
+// right. Tall (iPad upright, narrow AUv3 window): the same two blocks stacked.
+void OmniEditor::layoutPadsCompact (Rectangle<int> r)
+{
+    const bool wide = r.getWidth() > r.getHeight() * 5 / 4;
+    Rectangle<int> padArea;
+    if (wide)
+    {
+        padArea = r.removeFromLeft (jmin (r.getHeight() + 44, r.getWidth() / 2));
+        r.removeFromLeft (10);
+        auto banks = padArea.removeFromLeft (40);
+        padArea.removeFromLeft (4);
+        const int bh = jmin (44, banks.getHeight() / 4);
+        for (auto& b : bankBtn) b.setBounds (banks.removeFromTop (bh).reduced (0, 2));
+    }
+    else
+    {
+        padArea = r.removeFromTop (jmin (r.getWidth(), r.getHeight() * 9 / 20) + 38);
+        r.removeFromTop (8);
+        auto banks = padArea.removeFromTop (34);
+        padArea.removeFromTop (4);
+        for (auto& b : bankBtn) { b.setBounds (banks.removeFromLeft (56)); banks.removeFromLeft (4); }
+    }
+    const int side = jmin (padArea.getWidth(), padArea.getHeight()) / 4;
+    auto grid = padArea.withSizeKeepingCentre (side * 4, side * 4).withY (padArea.getY());
+    for (int i = 0; i < kPadsPerBank; ++i)
+    {
+        const int col = i % 4, row = 3 - i / 4;
+        padButtons[i]->setBounds (grid.getX() + col * side, grid.getY() + row * side, side, side);
+    }
+
+    auto head = r.removeFromTop (34);
+    addToPadBtn.setBounds (head.removeFromRight (jmin (140, head.getWidth() / 2)));
+    head.removeFromRight (6);
+    padTitle.setBounds (head);
+    r.removeFromTop (4);
+    auto tabs = r.removeFromTop (32);
+    const int tw = tabs.getWidth() / 3;
+    for (auto& b : detailBtn) b.setBounds (tabs.removeFromLeft (tw).reduced (1, 0));
+    r.removeFromTop (6);
+
+    if (detail == 0)
+    {
+        auto row = r.removeFromTop (30);
+        padNoteLabel.setBounds (row.removeFromLeft (62)); padNote.setBounds (row.removeFromLeft (jmin (90, row.getWidth() / 4))); row.removeFromLeft (8);
+        chokeLabel.setBounds (row.removeFromLeft (44)); chokeBox.setBounds (row.removeFromLeft (jmin (84, row.getWidth() / 3))); row.removeFromLeft (8);
+        oneShot.setBounds (row);
+        r.removeFromTop (4);
+        auto btns = r.removeFromBottom (32);
+        const int bw = btns.getWidth() / 4;
+        removeZoneBtn.setBounds (btns.removeFromLeft (bw).reduced (1, 0));
+        clearPadBtn.setBounds (btns.removeFromLeft (bw).reduced (1, 0));
+        remapBtn.setBounds (btns.reduced (1, 0));
+        r.removeFromBottom (4);
+        auto drop = r.removeFromBottom (30);
+        dropLabel.setBounds (drop.removeFromLeft (140));
+        dropModeBox.setBounds (drop);
+        r.removeFromBottom (4);
+        zoneList.setBounds (r);
+    }
+    else if (detail == 1) padZoneEditor.setBounds (r);
+    else                  padVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
+}
+
+void OmniEditor::layoutKeysCompact (Rectangle<int> r)
+{
+    auto head = r.removeFromTop (34);
+    const int bw = jmin (130, head.getWidth() / 5);
+    clearKeysBtn.setBounds (head.removeFromRight (bw).reduced (1, 0));
+    saveSfzBtn.setBounds (head.removeFromRight (bw).reduced (1, 0));
+    addKeysBtn.setBounds (head.removeFromRight (bw).reduced (1, 0));
+    loadInstBtn.setBounds (head.removeFromRight (bw + 20).reduced (1, 0));
+    head.removeFromRight (6);
+    keysTitle.setBounds (head);
+    r.removeFromTop (6);
+
+    const bool wide = r.getWidth() > r.getHeight() * 5 / 4;
+    auto mapArea = wide ? r.removeFromLeft (r.getWidth() / 2) : r.removeFromTop (r.getHeight() * 2 / 5);
+    if (wide) r.removeFromLeft (10); else r.removeFromTop (8);
+    keyboard.setBounds (mapArea.removeFromBottom (jmin (84, mapArea.getHeight() / 3)));
+    keyboard.setKeyWidth (jmax (14.0f, keyboard.getWidth() / 22.0f));   // about three octaves, wide enough for fingers; swipe to scroll
+    mapArea.removeFromBottom (4);
+    zoneMap.setBounds (mapArea);
+
+    auto tabs = r.removeFromTop (32);
+    const int tw = tabs.getWidth() / 3;
+    for (auto& b : detailBtn) b.setBounds (tabs.removeFromLeft (tw).reduced (1, 0));
+    r.removeFromTop (6);
+    if (detail == 0)
+    {
+        removeZoneBtn.setBounds (r.removeFromBottom (32).removeFromLeft (110));
+        r.removeFromBottom (4);
+        zoneList.setBounds (r);
+    }
+    else if (detail == 1) keyZoneEditor.setBounds (r);
+    else                  keyVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
 }
 
 void OmniEditor::layoutPads (Rectangle<int> r)

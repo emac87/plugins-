@@ -159,6 +159,31 @@ int main (int argc, char** argv)
         for (auto* ch : c.getChildren()) if (auto* b = dynamic_cast<juce::TextButton*> (ch)) if (b->getButtonText() == "Keys") { if (b->onClick) b->onClick(); }
         ed.selectKeyZone (1);
     });
+    // Small-screen (iPhone / AUv3) layouts: phone on its side, and a tall narrow window.
+    auto compact = [] (int w, int h, bool keys, const char* tab)
+    {
+        return [=] (juce::Component& c)
+        {
+            auto& ed = dynamic_cast<OmniEditor&> (c);
+            ed.setResizeLimits (300, 240, 4000, 4000);
+            ed.setSize (w, h);
+            for (auto* ch : c.getChildren())
+                if (auto* b = dynamic_cast<juce::TextButton*> (ch))
+                {
+                    if (keys && b->getButtonText() == "Keys" && b->onClick) b->onClick();
+                    if (b->getButtonText() == tab) b->setToggleState (true, juce::sendNotificationSync);
+                }
+            if (keys) ed.selectKeyZone (1);
+        };
+    };
+    snapshot (p, out.getChildFile ("omni-phone-pads.png"), compact (750, 350, false, "Samples"));
+    snapshot (p, out.getChildFile ("omni-phone-pads-edit.png"), compact (750, 350, false, "Edit"));
+    snapshot (p, out.getChildFile ("omni-phone-pads-sound.png"), compact (750, 350, false, "Sound"));
+    snapshot (p, out.getChildFile ("omni-phone-keys.png"), compact (750, 350, true, "Samples"));
+    snapshot (p, out.getChildFile ("omni-phone-keys-edit.png"), compact (750, 350, true, "Edit"));
+    snapshot (p, out.getChildFile ("omni-phone-keys-sound.png"), compact (750, 350, true, "Sound"));
+    snapshot (p, out.getChildFile ("omni-tall-pads.png"), compact (800, 1100, false, "Samples"));
+    snapshot (p, out.getChildFile ("omni-tall-keys.png"), compact (800, 1100, true, "Sound"));
     std::printf (failures ? "FAILURES: %d\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

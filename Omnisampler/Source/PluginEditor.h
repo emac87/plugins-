@@ -100,6 +100,8 @@ public:
     void selectKeyZone (int z);
     void refreshAll();
     void showMessage (const juce::String& title, const juce::String& text);
+    void browsePadSamples (int pad);   // file picker, then load onto that pad
+    bool isCompact() const;            // small screen (iPhone, small AUv3 window): one detail panel at a time
     omni::DropMode dropMode() const { return dropModeBox.getSelectedId() == 2 ? omni::DropMode::RoundRobin : omni::DropMode::VelocityLayers; }
     int playChannel (bool pads) const;
 
@@ -107,6 +109,20 @@ private:
     void timerCallback() override;
     void layoutPads (juce::Rectangle<int>);
     void layoutKeys (juce::Rectangle<int>);
+    void layoutPadsCompact (juce::Rectangle<int>);
+    void layoutKeysCompact (juce::Rectangle<int>);
+    void applyVisibility();
+    void browseKeySamples();
+    void browseInstrument();
+    void browseKit();
+    void saveKitAs();
+    void saveSfzAs();
+    void padFilesChosen (int pad, const juce::Array<juce::File>&);
+    void instrumentChosen (const juce::File&);   // .omni, .sfz, .dspreset, .dslibrary or a folder
+   #if JUCE_IOS
+    void showLoadMenu (juce::Component& target, bool withKits);
+    void askNameThen (const juce::String& title, const juce::String& initial, std::function<void (juce::String)> then);
+   #endif
     void setView (bool keys);
     const std::vector<omni::Zone>& currentZones() const;
 
@@ -146,6 +162,9 @@ private:
     ZoneEditor padZoneEditor { false }, keyZoneEditor { true };
     VoicingControls padVoicing, keyVoicing;
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::TextButton detailBtn[3] { juce::TextButton ("Samples"), juce::TextButton ("Edit"), juce::TextButton ("Sound") };
+    int detail = 0;          // which panel a small screen shows
+    bool wasCompact = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OmniEditor)
 };
