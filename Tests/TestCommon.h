@@ -23,13 +23,14 @@ inline double rms (const juce::AudioBuffer<float>& b, int ch, int start, int n)
 
 inline void snapshot (juce::AudioProcessor& p, const juce::File& out, std::function<void (juce::Component&)> prep = {})
 {
-    std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditor());
+    std::unique_ptr<juce::AudioProcessorEditor> ed (p.createEditorIfNeeded());   // (createEditor is private in newer JUCE)
     if (prep) prep (*ed);
     auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
     out.deleteFile();
     juce::FileOutputStream fos (out);
     juce::PNGImageFormat().writeImageToStream (img, fos);
     std::printf ("  wrote %s (%dx%d)\n", out.getFullPathName().toRawUTF8(), img.getWidth(), img.getHeight());
+    p.editorBeingDeleted (ed.get());   // what a host does before it deletes the editor
 }
 
 inline bool writeWav (const juce::File& f, const juce::AudioBuffer<float>& b, double sr, juce::StringPairArray meta = {})

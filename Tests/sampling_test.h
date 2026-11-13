@@ -375,21 +375,20 @@ inline void testSampling (const juce::File& dir, const juce::File& out)
         CHECK (sawOff && fx2.autoSampler.state() == AutoSampler::State::Idle && fx2.getInstrument() == before, "cancelling sends the note-off and changes nothing");
     }
 
-    // Optional: a real plug-in loaded inside Omnisampler and sampled (set OMNI_HOST_VST3 to an Omnisampler.vst3;
-    // it is given the test synth's state so it has something to play).
+    // Optional: a real plug-in loaded inside Omnisampler and sampled.
+    //   OMNI_HOST_VST3 = path of an Omnisampler.vst3: it is given the test synth's state, so every result can be checked.
+    //   OMNI_HOST_AU   = an Audio Unit instrument that sounds without any set-up, e.g. Apple's "AudioUnit:Synths/aumu,dls ,appl".
    #if OMNI_HOSTING
-    if (const auto path = juce::SystemStats::getEnvironmentVariable ("OMNI_HOST_VST3", {}); path.isNotEmpty())
+    auto hostTest = [&] (const juce::String& format, const juce::String& id, bool ourSynth)
     {
         OmniProcessor h; h.prepareToPlay (kSr, 512);
-        std::printf ("    plug-ins found on this machine: %d\n", h.instrumentPlugins().size());
+        if (ourSynth) std::printf ("    instrument plug-ins found on this machine: %d\n", h.instrumentPlugins().size());
         bool done = false; juce::String err;
-        // Loading is asynchronous: run the message loop until the plug-in has loaded (or 20 s have passed).
-        h.loadHosted ({ "Hosted Omnisampler", "VST3", path }, [&] (const juce::String& e) { done = true; err = e; juce::MessageManager::getInstance()->stopDispatchLoop(); });
-        juce::Timer::callAfterDelay (20000, [] { juce::MessageManager::getInstance()->stopDispatchLoop(); });
-        juce::MessageManager::getInstance()->runDispatchLoop();
-        std::printf ("    loadHosted: %s %s\n", done ? "called back" : "no callback", err.toRawUTF8());
-        CHECK (done && err.isEmpty() && h.hosted() != nullptr, "a VST3 instrument loads inside Omnisampler");
-        if (h.hosted() != nullptr)
+        h.loadHosted ({ "Hosted " + format, format, id }, [&] (const juce::String& e) { done = true; err = e; });
+        std::printf ("    load %s %s: %s %s\n", format.toRawUTF8(), id.toRawUTF8(), done ? "done" : "no answer", err.toRawUTF8());
+        CHECK (done && err.isEmpty() && h.hosted() != nullptr, ourSynth ? "a VST3 instrument loads inside Omnisampler" : "an Audio Unit instrument loads inside Omnisampler");
+        if (h.hosted() == nullptr) return;
+        if (ourSynth)
         {
             // Hand it the test synth's state, wrapped the way JUCE's VST3 host stores a plug-in's state.
             juce::MemoryBlock raw, mb; synth.getStateInformation (raw);
@@ -397,24 +396,26 @@ inline void testSampling (const juce::File& dir, const juce::File& out)
             wrap.createNewChildElement ("IComponent")->addTextElement (raw.toBase64Encoding());
             juce::AudioProcessor::copyXmlToBinary (wrap, mb);
             h.hosted()->setStateInformation (mb.getData(), (int) mb.getSize());
-            // Auditioning: the keyboard's notes reach the loaded plug-in and its sound comes out of Omnisampler.
-            const auto heard = playNote (h, 1, 60, 127, 0.4, 0.3);
-            std::printf ("    audition: rms %.4f at %.1f Hz\n", rms (heard, 0, 2000, 8000), freqOf (heard, 2000, 8000));
-            CHECK (h.audition.load() && rms (heard, 0, 2000, 8000) > 0.05 && std::abs (freqOf (heard, 2000, 8000) - 262.5) < 6.0, "the keyboard plays the loaded plug-in");
-            AutoSettings a; a.loNote = 48; a.hiNote = 72; a.step = 12; a.velLayers = 2; a.holdSecs = 0.5f; a.tailSecs = 0.4f; a.name = "Hosted";
-            CHECK (h.startAutoSampler (a, true).isEmpty(), "the Auto Sampler starts on the loaded plug-in");
-            waitFor (h);
-            std::printf ("    %s\n", h.samplingMessage.toRawUTF8());
-            const auto& z = h.getInstrument()->keys.zones;
-            bool ok = z.size() == 6;
-            for (auto& q : z) ok = ok && detectRoot (*q.sample) == q.root;
-            CHECK (ok && ! h.audition.load(), "the loaded plug-in is sampled into six zones, and the keyboard switches to the copy");
-            const auto copy = playNote (h, 1, 60, 127, 0.4, 0.3);
-            CHECK (std::abs (freqOf (copy, 2000, 8000) - 262.5) < 6.0, "the copy plays");
-            h.unloadHosted();
-            CHECK (h.hosted() == nullptr, "the plug-in unloads");
         }
-    }
+        // Auditioning: the keyboard's notes reach the loaded plug-in and its sound comes out of Omnisampler.
+        const auto heard = playNote (h, 1, 60, 127, 0.4, 0.3);
+        std::printf ("    audition: rms %.4f at %.1f Hz\n", rms (heard, 0, 2000, 8000), freqOf (heard, 2000, 8000));
+        CHECK (h.audition.load() && rms (heard, 0, 2000, 8000) > 0.002 && (! ourSynth || std::abs (freqOf (heard, 2000, 8000) - 262.5) < 6.0), "the keyboard plays the loaded plug-in");
+        AutoSettings a; a.loNote = 48; a.hiNote = 72; a.step = 12; a.velLayers = 2; a.holdSecs = 0.5f; a.tailSecs = 0.4f; a.name = "Hosted " + format;
+        CHECK (h.startAutoSampler (a, true).isEmpty(), "the Auto Sampler starts on the loaded plug-in");
+        waitFor (h);
+        std::printf ("    %s\n", h.samplingMessage.toRawUTF8());
+        const auto& z = h.getInstrument()->keys.zones;
+        int inTune = 0;
+        for (auto& q : z) { const int r = detectRoot (*q.sample); std::printf ("      %-30s root %d, heard %d\n", q.sample->file.getFileName().toRawUTF8(), q.root, r); inTune += r == q.root ? 1 : 0; }
+        CHECK (z.size() == 6 && inTune >= (ourSynth ? 6 : 4) && ! h.audition.load(), "the loaded plug-in is sampled into six zones, and the keyboard switches to the copy");
+        const auto copy = playNote (h, 1, 60, 127, 0.4, 0.3);
+        CHECK (rms (copy, 0, 2000, 8000) > 0.002 && (! ourSynth || std::abs (freqOf (copy, 2000, 8000) - 262.5) < 6.0), "the copy plays");
+        h.unloadHosted();
+        CHECK (h.hosted() == nullptr, "the plug-in unloads");
+    };
+    if (const auto path = juce::SystemStats::getEnvironmentVariable ("OMNI_HOST_VST3", {}); path.isNotEmpty()) hostTest ("VST3", path, true);
+    if (const auto id = juce::SystemStats::getEnvironmentVariable ("OMNI_HOST_AU", {}); id.isNotEmpty()) hostTest ("AudioUnit", id, false);
    #endif
 
     // The Sample page, on the instrument and on the effect.

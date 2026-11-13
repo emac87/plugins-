@@ -244,11 +244,21 @@ void OmniProcessor::setMidiOutput (int index)
 
 // ---- a plug-in loaded inside Omnisampler, to be sampled ---------------------------------------
 #if OMNI_HOSTING
+// Newer JUCE (8.0.9 on) moved "add the plug-in formats this build supports" out of the manager class.
+static void addPluginFormats (AudioPluginFormatManager& m)
+{
+   #if __has_include (<juce_audio_processors/format/juce_AudioPluginFormatManagerHelpers.h>)
+    addDefaultFormatsToManager (m);
+   #else
+    m.addDefaultFormats();
+   #endif
+}
+
 Array<OmniProcessor::PluginChoice> OmniProcessor::instrumentPlugins (bool rescan)
 {
     if (! pluginList.isEmpty() && ! rescan) return pluginList;
     pluginList.clear();
-    if (hostFormats.getNumFormats() == 0) hostFormats.addDefaultFormats();
+    if (hostFormats.getNumFormats() == 0) addPluginFormats (hostFormats);
     for (auto* f : hostFormats.getFormats())
     {
         const bool au = f->getName() == "AudioUnit";
@@ -267,7 +277,7 @@ Array<OmniProcessor::PluginChoice> OmniProcessor::instrumentPlugins (bool rescan
 void OmniProcessor::loadHosted (const PluginChoice& c, std::function<void (const String&)> done)
 {
     if (autoSampler.state() == AutoSampler::State::Running) { done ("Stop the Auto Sampler first."); return; }
-    if (hostFormats.getNumFormats() == 0) hostFormats.addDefaultFormats();
+    if (hostFormats.getNumFormats() == 0) addPluginFormats (hostFormats);
     PluginDescription desc;
     desc.pluginFormatName = c.format; desc.fileOrIdentifier = c.id; desc.name = c.name; desc.isInstrument = true;
     if (c.format != "AudioUnit")
@@ -282,6 +292,19 @@ void OmniProcessor::loadHosted (const PluginChoice& c, std::function<void (const
     }
     const double sr = rateNow > 0.0 ? rateNow : 44100.0;
     const int block = blockNow;
+    AudioPluginFormat* format = nullptr;
+    for (auto* f : hostFormats.getFormats()) if (f->getName() == desc.pluginFormatName) format = f;
+    if (format == nullptr) { done ("This build can't load " + c.format + " plug-ins."); return; }
+    if (! format->requiresUnblockedMessageThreadDuringCreation (desc))
+    {
+        // Most plug-ins (VST3, Audio Unit v2) load straight away. Only the newer kind of Audio Unit has to load in the background.
+        String err;
+        auto inst = format->createInstanceFromDescription (desc, sr, block, err);
+        if (inst == nullptr) { done (err.isNotEmpty() ? err : "Couldn't load " + c.name + "."); return; }
+        setHosted (std::move (inst), c.name);
+        done ({});
+        return;
+    }
     hostFormats.createPluginInstanceAsync (desc, sr, block, [this, stillHere = alive, name = c.name, done] (std::unique_ptr<AudioPluginInstance> inst, const String& err)
     {
         if (! stillHere->load()) return;
