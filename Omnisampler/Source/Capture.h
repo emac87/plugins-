@@ -112,7 +112,7 @@ namespace omni
         // audio input is recorded. process() must then be called from the audio thread.
         bool startRealtime (const AutoSettings&, double sampleRate, const juce::File& folder, juce::MidiOutput* device);
         void cancel();                                // stops and waits; captured notes are kept on disk but not used
-        void reset() { if (! isThreadRunning()) st = State::Idle; }
+        void reset() { if (st.load() != State::Running) { stopThread (5000); st = State::Idle; } }   // once the results have been used
         void process (const float* L, const float* R, int n, juce::MidiBuffer& midiOut);
 
         State state() const noexcept { return st.load(); }
