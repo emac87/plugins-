@@ -110,6 +110,19 @@ namespace look
         juce::Font getComboBoxFont (juce::ComboBox& c) override { return juce::Font (juce::FontOptions (juce::jmin (14.0f, c.getHeight() * 0.55f))); }
         juce::Font getPopupMenuFont() override { return juce::Font (juce::FontOptions (14.0f)); }
 
+        // On iPhone/iPad a plug-in (AUv3 in AUM, Loopy Pro...) can't open windows of its own, so a
+        // pop-up menu or combo-box list shown as a separate window never appears. Open it inside
+        // the plug-in's own view instead (harmless in the iOS standalone app too).
+        juce::Component* getParentComponentForMenuOptions (const juce::PopupMenu::Options& o) override
+        {
+           #if JUCE_IOS
+            if (o.getParentComponent() == nullptr)
+                if (auto* t = o.getTargetComponent())
+                    return t->getTopLevelComponent();
+           #endif
+            return juce::LookAndFeel_V4::getParentComponentForMenuOptions (o);
+        }
+
         void drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox& box) override
         {
             auto r = juce::Rectangle<float> (0, 0, (float) w, (float) h).reduced (0.5f);
