@@ -24,10 +24,9 @@ cmake --build "$B" --config Release -j "$(sysctl -n hw.ncpu)" >> "$LOG" 2>&1 || 
 say "BUILT"
 A="$B/Omnisampler/Omnisampler_artefacts/Release"; F="$B/Omnisampler/OmnisamplerFX_artefacts/Release"
 
-say "Testing..."
+say "Testing (details in tools/test_mac.log)..."
 TESTS=passed
-if ! (cd "$B" && OMNI_HOST_VST3="$A/VST3/Omnisampler.vst3" OMNI_HOST_AU="AudioUnit:Synths/aumu,dls ,appl" \
-      ctest -C Release --timeout 900 --output-on-failure) >> "$LOG" 2>&1; then TESTS=failed; fi
+bash "$ROOT/tools/test_mac_omnisampler.command" >> "$LOG" 2>&1 || TESTS=failed
 say "TESTS $TESTS"
 
 say "Packaging..."

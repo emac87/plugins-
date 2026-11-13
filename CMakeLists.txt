@@ -80,5 +80,6 @@ endif()
 
 option(BUILD_TESTS "Build the headless test programs" OFF)
 if(BUILD_TESTS)
+    enable_testing()   # here, not only in Tests/, so that `ctest --test-dir build` finds the tests
     add_subdirectory(Tests)
 endif()
