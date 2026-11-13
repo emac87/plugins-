@@ -1,4 +1,12 @@
 #include "PluginEditor.h"
+#if JucePlugin_Build_Standalone && ! JUCE_IOS && ! JUCE_ANDROID
+ // The standalone app mutes its audio input by default (JUCE's guard against feedback). Omnisampler
+ // doesn't pass the input through unless asked, so the Sample page switches that mute off.
+ #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
+ #define OMNI_STANDALONE_INPUT 1
+#else
+ #define OMNI_STANDALONE_INPUT 0
+#endif
 #include "IOSFiles.h"
 
 using namespace juce;
@@ -572,16 +580,21 @@ OmniEditor::OmniEditor (OmniProcessor& p)
 {
     setLookAndFeel (&lnf);
     shownInst = proc.getInstrument();
-    logo.setText ("OMNISAMPLER", dontSendNotification);
+    logo.setText (proc.fx ? "OMNISAMPLER FX" : "OMNISAMPLER", dontSendNotification);
     logo.setFont (FontOptions (19.0f, Font::bold));
     logo.setColour (Label::textColourId, lnf.accent);
     voices.setColour (Label::textColourId, look::textDim);
     voices.setFont (FontOptions (12.0f));
 
-    padsTab.setRadioGroupId (1); keysTab.setRadioGroupId (1);
-    padsTab.setClickingTogglesState (true); keysTab.setClickingTogglesState (true);
+    padsTab.setRadioGroupId (1); keysTab.setRadioGroupId (1); sampleTab.setRadioGroupId (1);
+    padsTab.setClickingTogglesState (true); keysTab.setClickingTogglesState (true); sampleTab.setClickingTogglesState (true);
     padsTab.onClick = [this] { setView (false); };
     keysTab.onClick = [this] { setView (true); };
+    sampleTab.onClick = [this] { setSampleView(); };
+    sampleTab.setTooltip ("Record from the audio input, or auto-sample an instrument");
+    addChildComponent (sampleTab);
+    sampleTab.setVisible (OmniProcessor::canSample());
+    addChildComponent (samplingPanel);
     aMaster = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, "master", masterKnob.slider);
     masterKnob.slider.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
     masterKnob.slider.setPopupDisplayEnabled (true, true, this);
@@ -733,6 +746,8 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     padsTab.setToggleState (true, dontSendNotification);
     setView (false);
     selectPad (0);
+    lastSamplingSerial = proc.samplingSerial.load();
+    if (proc.fx) setSampleView();   // the effect is there to sample: open on that page
     startTimerHz (30);
 }
 
@@ -749,9 +764,26 @@ void OmniEditor::showMessage (const String& title, const String& text)
     AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, title, text, "OK", this);
 }
 
+void OmniEditor::setSampleView()
+{
+    if (! OmniProcessor::canSample()) return;
+    showingSample = true;
+    padsTab.setToggleState (false, dontSendNotification);
+    keysTab.setToggleState (false, dontSendNotification);
+    sampleTab.setToggleState (true, dontSendNotification);
+   #if OMNI_STANDALONE_INPUT
+    if (auto* holder = StandalonePluginHolder::getInstance()) holder->getMuteInputValue().setValue (false);
+   #endif
+    applyVisibility();
+    keyboard.setMidiChannel (playChannel (false));
+    resized();
+}
+
 void OmniEditor::setView (bool keys)
 {
     showingKeys = keys;
+    showingSample = false;
+    sampleTab.setToggleState (false, dontSendNotification);
     if (keys && detail == 3) { detail = 2; detailBtn[2].setToggleState (true, dontSendNotification); }
     padsTab.setToggleState (! keys, dontSendNotification);
     keysTab.setToggleState (keys, dontSendNotification);
@@ -769,9 +801,10 @@ void OmniEditor::applyVisibility()
     const bool keys = showingKeys, c = isCompact();
     const bool list = ! c || detail == 0, edit = ! c || detail == 1, sound = ! c || detail == 2;
     const bool padVoicingShown = c ? detail == 2 : padBottom == 0, padLayersShown = c ? detail == 3 : padBottom == 1;
-    auto show = [] (std::initializer_list<Component*> cs, bool v) { for (auto* comp : cs) comp->setVisible (v); };
+    const bool sp = showingSample;   // the Sample page replaces the Pads / Keys pages
+    auto show = [sp] (std::initializer_list<Component*> cs, bool v) { for (auto* comp : cs) comp->setVisible (v && ! sp); };
     show ({ &bankBtn[0], &bankBtn[1], &bankBtn[2], &bankBtn[3], &padTitle, &addToPadBtn }, ! keys);
-    for (auto& pb : padButtons) pb->setVisible (! keys);
+    for (auto& pb : padButtons) pb->setVisible (! keys && ! sp);
     show ({ &padNote, &chokeBox, &dropModeBox, &oneShot, &padNoteLabel, &chokeLabel, &dropLabel, &clearPadBtn, &remapBtn }, ! keys && list);
     show ({ &padZoneEditor }, ! keys && edit);
     show ({ &padVoicing }, ! keys && padVoicingShown);
@@ -793,7 +826,10 @@ void OmniEditor::applyVisibility()
     const bool outs = proc.hasOutputPicker();
     show ({ &padOutput, &padOutputLabel }, outs && ! keys && (c ? detail == 2 : list));
     show ({ &keysOutput, &keysOutputLabel }, outs && keys && sound);
-    show ({ &voices }, true);
+    voices.setVisible (true);
+    // The Sample page keeps the keyboard, to try a plug-in before sampling it and the result afterwards.
+    if (sp) keyboard.setVisible (true);
+    samplingPanel.setVisible (sp);
     zoneList.setRowHeight (c ? 30 : 22);
 }
 
@@ -1133,6 +1169,7 @@ void OmniEditor::refreshAll()
     removeZoneBtn.setEnabled (sel >= 0);
     for (auto& pb : padButtons) pb->repaint();
     zoneMap.repaint();
+    if (samplingPanel.isVisible()) samplingPanel.refresh();
 }
 
 int OmniEditor::getNumRows() { return (int) currentZones().size(); }
@@ -1188,6 +1225,13 @@ void OmniEditor::timerCallback()
         if (pb->flash > 0.0f) { pb->flash = jmax (0.0f, pb->flash - 0.12f); pb->repaint(); }
     }
     voices.setText (String (proc.voiceCount.load()) + (isCompact() ? " v" : " voices"), dontSendNotification);
+    // A recording or an Auto Sampler run has landed on a pad or the keys.
+    if (const int serial = proc.samplingSerial.load(); serial != lastSamplingSerial)
+    {
+        lastSamplingSerial = serial;
+        refreshAll();
+        samplingPanel.news();
+    }
    #if JUCE_IOS
     // The notch changes sides when the phone is turned over; lay out again when the margins change.
     if (proc.wrapperType == AudioProcessor::wrapperType_Standalone)
@@ -1219,12 +1263,13 @@ void OmniEditor::resized()
         // The MIDI channel pickers sit in the top bar when they fit (phone on its side, iPad), dropping
         // the logo first if that makes the room; on a narrow screen they get a row of their own.
         const int chNeed = 324;   // two MIDI channel pickers and the voice count
-        const int fixedW = 64 + 4 + 64 + 76 + 4 + 76 + 4 + 34 + (masterKnob.isVisible() ? 54 : 0) + 16;
+        const int fixedW = 64 + 4 + 64 + (sampleTab.isVisible() ? 68 : 0) + 76 + 4 + 76 + 4 + 34 + (masterKnob.isVisible() ? 54 : 0) + 16;
         const bool chInline = r.getWidth() - fixedW >= chNeed;
         logo.setVisible (r.getWidth() >= 520 && (! chInline || r.getWidth() - fixedW - 132 >= chNeed));
         if (logo.isVisible()) logo.setBounds (top.removeFromLeft (132));
         padsTab.setBounds (top.removeFromLeft (64).reduced (0, 3)); top.removeFromLeft (4);
         keysTab.setBounds (top.removeFromLeft (64).reduced (0, 3));
+        if (sampleTab.isVisible()) { top.removeFromLeft (4); sampleTab.setBounds (top.removeFromLeft (64).reduced (0, 3)); }
         if (masterKnob.isVisible()) { masterKnob.setBounds (top.removeFromRight (48)); top.removeFromRight (6); }
         optionsBtn.setBounds (top.removeFromRight (34).reduced (0, 3)); top.removeFromRight (4);
         saveKitBtn.setBounds (top.removeFromRight (76).reduced (0, 3)); top.removeFromRight (4);
@@ -1240,16 +1285,21 @@ void OmniEditor::resized()
         padsChLabel.setBounds (padsHalf.removeFromLeft (58)); padsHalf.removeFromLeft (4); padsCh.setBounds (padsHalf.removeFromLeft (jmin (88, padsHalf.getWidth())).reduced (0, 1));
         keysChLabel.setBounds (keysHalf.removeFromLeft (58)); keysHalf.removeFromLeft (4); keysCh.setBounds (keysHalf.removeFromLeft (jmin (88, keysHalf.getWidth())).reduced (0, 1));
         r.removeFromTop (6);
-        if (showingKeys) layoutKeysCompact (r); else layoutPadsCompact (r);
+        if (showingSample) layoutSample (r);
+        else if (showingKeys) layoutKeysCompact (r); else layoutPadsCompact (r);
         return;
     }
-    logo.setVisible (true);
     masterKnob.setVisible (true);
     auto top = r.removeFromTop (48);
-    logo.setBounds (top.removeFromLeft (160));
-    padsTab.setBounds (top.removeFromLeft (80).reduced (0, 9)); top.removeFromLeft (4);
-    keysTab.setBounds (top.removeFromLeft (80).reduced (0, 9)); top.removeFromLeft (16);
-    voices.setBounds (top.removeFromLeft (80));
+    // The logo gives way first when the window is narrow.
+    const int logoW = proc.fx ? 196 : 160;
+    logo.setVisible (r.getWidth() >= logoW + 940);
+    if (logo.isVisible()) logo.setBounds (top.removeFromLeft (logoW));
+    padsTab.setBounds (top.removeFromLeft (76).reduced (0, 9)); top.removeFromLeft (4);
+    keysTab.setBounds (top.removeFromLeft (76).reduced (0, 9));
+    if (sampleTab.isVisible()) { top.removeFromLeft (4); sampleTab.setBounds (top.removeFromLeft (76).reduced (0, 9)); }
+    top.removeFromLeft (14);
+    voices.setBounds (top.removeFromLeft (72));
     voices.setJustificationType (Justification::centredLeft);
     masterKnob.setBounds (top.removeFromRight (60)); top.removeFromRight (12);
     optionsBtn.setBounds (top.removeFromRight (34).reduced (0, 9)); top.removeFromRight (4);
@@ -1258,7 +1308,21 @@ void OmniEditor::resized()
     keysCh.setBounds (top.removeFromRight (80).reduced (0, 10)); keysChLabel.setBounds (top.removeFromRight (70)); top.removeFromRight (6);
     padsCh.setBounds (top.removeFromRight (80).reduced (0, 10)); padsChLabel.setBounds (top.removeFromRight (70));
     r.removeFromTop (6);
-    if (showingKeys) layoutKeys (r); else layoutPads (r);
+    if (showingSample) layoutSample (r);
+    else if (showingKeys) layoutKeys (r); else layoutPads (r);
+}
+
+// The Sample page: the sampling panel with the keyboard under it.
+void OmniEditor::layoutSample (Rectangle<int> r)
+{
+    if (r.getHeight() > 420)
+    {
+        keyboard.setBounds (r.removeFromBottom (jmin (70, r.getHeight() / 8)));
+        keyboard.setKeyWidth (jmax (8.0f, (float) keyboard.getWidth() / 52.0f));
+        r.removeFromBottom (6);
+    }
+    else keyboard.setBounds ({});
+    samplingPanel.setBounds (r);
 }
 
 // Small screens. Wide (phone on its side): pads or key map on the left, one detail panel on the

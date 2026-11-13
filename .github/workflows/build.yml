@@ -37,6 +37,15 @@ jobs:
               "Not notarised. If a host won't load it, run in Terminal:" \
               "  xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/\"$n.component\" ~/Library/Audio/Plug-Ins/VST3/\"$n.vst3\"" \
               > "$d/README.txt"
+            if [ "$t" = "Omnisampler" ]; then
+              # Omnisampler FX (the effect that samples from its input) ships in the same zip.
+              fx="build/Omnisampler/OmnisamplerFX_artefacts/Release"
+              cp -R "$fx/AU/Omnisampler FX.component" "$fx/VST3/Omnisampler FX.vst3" "$d/"
+              for b in "$d/Omnisampler FX.component" "$d/Omnisampler FX.vst3"; do codesign --force --deep --sign - "$b"; done
+              printf '%s\n' "" \
+                "Omnisampler FX.component / .vst3  The effect version: put it in an effects slot to sample what comes in." \
+                "                                  Copy them to the same two folders." >> "$d/README.txt"
+            fi
             (cd pkg && ditto -c -k --keepParent "$n" "../$t-macos.zip")
           done
       - uses: actions/upload-artifact@v4
@@ -79,7 +88,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64 -DBUILD_TESTS=ON
       - name: Build
-        run: cmake --build build --config Release --target ContourEQ_VST3 ContourEQ_Standalone CaptureRack_VST3 CaptureRack_Standalone Omnisampler_VST3 Omnisampler_Standalone contour_tests rack_tests omni_tests
+        run: cmake --build build --config Release --target ContourEQ_VST3 ContourEQ_Standalone CaptureRack_VST3 CaptureRack_Standalone Omnisampler_VST3 Omnisampler_Standalone OmnisamplerFX_VST3 contour_tests rack_tests omni_tests
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Package
@@ -91,6 +100,7 @@ jobs:
             New-Item -ItemType Directory -Force $d | Out-Null
             Copy-Item -Recurse "$a/VST3/$n.vst3" $d/
             Copy-Item "$a/Standalone/$n.exe" $d/
+            if ($t -eq "Omnisampler") { Copy-Item -Recurse "build/Omnisampler/OmnisamplerFX_artefacts/Release/VST3/Omnisampler FX.vst3" $d/ }
             @("$n", "", "$n.exe   Standalone: run it from anywhere. SmartScreen may warn (not signed): More info > Run anyway.",
               "$n.vst3  VST3: copy the whole folder to C:\Program Files\Common Files\VST3\ and rescan in your DAW.") | Set-Content "$d/README.txt"
             Compress-Archive -Path $d -DestinationPath "$t-windows.zip" -Force
@@ -114,6 +124,9 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
       - name: Build tests
-        run: cmake --build build --target contour_tests rack_tests omni_tests
+        run: cmake --build build --target contour_tests rack_tests omni_tests Omnisampler_VST3
       - name: Test
+        # The Omnisampler tests also load the freshly built VST3 inside Omnisampler and auto-sample it.
+        env:
+          OMNI_HOST_VST3: ${{ github.workspace }}/build/Omnisampler/Omnisampler_artefacts/Release/VST3/Omnisampler.vst3
         run: ctest --test-dir build --output-on-failure

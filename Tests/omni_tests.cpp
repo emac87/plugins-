@@ -4,6 +4,7 @@
 #include "fmt_dsexport_test.h"
 #include "fmt_sf2_exs_test.h"
 #include "fmt_ableton_kontakt_test.h"
+#include "sampling_test.h"
 
 using namespace omni;
 
@@ -409,6 +410,8 @@ int main (int argc, char** argv)
         CHECK (r.touchVelocity.load(), "the touch velocity setting is saved with the session");
         CHECK (r.getBusCount (false) == kOutputs, "16 stereo outputs on every platform");
     }
+    // Recording from the input (Omnisampler FX) and the Auto Sampler.
+    testSampling (dir.getChildFile ("sampling"), out);
     std::printf (failures ? "FAILURES: %d\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

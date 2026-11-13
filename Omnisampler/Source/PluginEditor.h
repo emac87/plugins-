@@ -1,6 +1,7 @@
 #pragma once
 #include "PluginProcessor.h"
 #include "PluginLook.h"
+#include "SamplingPanel.h"
 
 class OmniEditor;
 
@@ -130,6 +131,7 @@ public:
     look::PluginLook lnf { juce::Colour (0xff8f7bff) };
     int bank = 0, selectedPad = 0, selectedPadZone = 0, selectedKeyZone = 0;
     bool showingKeys = false;
+    bool showingSample = false;   // the Sample page (recording and the Auto Sampler) instead of Pads or Keys
 
     void selectPad (int pad);
     void selectKeyZone (int z);
@@ -137,6 +139,7 @@ public:
     void showMessage (const juce::String& title, const juce::String& text);
     void addSynthLayerMenu (juce::Component& target);   // popup of drum models, adds a synth layer to the selected pad
     void browsePadSamples (int pad);   // file picker, then load onto that pad
+    void openInstrument (const juce::File& f) { instrumentChosen (f); }   // a kit, an instrument file or a folder
     bool isCompact() const;            // small screen (iPhone, small AUv3 window): one detail panel at a time
     omni::DropMode dropMode() const { return dropModeBox.getSelectedId() == 2 ? omni::DropMode::RoundRobin : omni::DropMode::VelocityLayers; }
     int playChannel (bool pads) const;
@@ -147,6 +150,7 @@ private:
     void layoutKeys (juce::Rectangle<int>);
     void layoutPadsCompact (juce::Rectangle<int>);
     void layoutKeysCompact (juce::Rectangle<int>);
+    void layoutSample (juce::Rectangle<int>);
     void applyVisibility();
     void browseKeySamples();
     void browseInstrument();
@@ -164,6 +168,7 @@ private:
     void askNameThen (const juce::String& title, const juce::String& initial, std::function<void (juce::String)> then);
    #endif
     void setView (bool keys);
+    void setSampleView();
     const std::vector<omni::Zone>& currentZones() const;
 
     // ListBoxModel for the zone list (pads or keys, whichever is visible).
@@ -176,7 +181,7 @@ private:
 
     // top bar
     juce::Label logo, voices;
-    juce::TextButton padsTab { "Pads" }, keysTab { "Keys" }, loadKitBtn { "Load kit" }, saveKitBtn { "Save kit" }, optionsBtn { "..." };
+    juce::TextButton padsTab { "Pads" }, keysTab { "Keys" }, sampleTab { "Sample" }, loadKitBtn { "Load kit" }, saveKitBtn { "Save kit" }, optionsBtn { "..." };
     look::Knob masterKnob { "MASTER" };
     juce::ComboBox padsCh, keysCh;
     juce::Label padsChLabel { {}, "Pads MIDI" }, keysChLabel { {}, "Keys MIDI" };
@@ -211,6 +216,8 @@ private:
     juce::TextButton detailBtn[4] { juce::TextButton ("Samples"), juce::TextButton ("Edit"), juce::TextButton ("Sound"), juce::TextButton ("Layers") };
     int detail = 0;          // which panel a small screen shows
     bool wasCompact = false;
+    SamplingPanel samplingPanel { *this };
+    int lastSamplingSerial = 0;
     juce::BorderSize<int> lastSafeInsets;   // iOS: notch / home bar margins the layout was made for
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (OmniEditor)

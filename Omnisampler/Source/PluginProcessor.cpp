@@ -22,28 +22,47 @@ AudioProcessorValueTreeState::ParameterLayout OmniProcessor::createLayout()
 
 // Main stereo output plus Out 2..16. On the desktop they're off until the host turns them on (e.g. Logic's
 // "Multi-Output"). On iPad/iPhone they're on from the start, so AUv3 hosts such as AUM and Loopy Pro list them.
-AudioProcessor::BusesProperties OmniProcessor::makeBuses()
+// Omnisampler FX is a plain stereo effect: one input, one output. The standalone app also gets an input,
+// so it can sample from an audio interface.
+AudioProcessor::BusesProperties OmniProcessor::makeBuses (bool isFx)
 {
+    if (isFx)
+        return BusesProperties().withInput ("Input", AudioChannelSet::stereo(), true).withOutput ("Output", AudioChannelSet::stereo(), true);
    #if JUCE_IOS
     constexpr bool extraOn = true;
    #else
     constexpr bool extraOn = false;
    #endif
-    auto b = BusesProperties().withOutput ("Main", AudioChannelSet::stereo(), true);
+    auto b = BusesProperties();
+   #if ! JUCE_IOS && ! JUCE_ANDROID
+    if (PluginHostType::jucePlugInClientCurrentWrapperType == wrapperType_Standalone)
+        b = b.withInput ("Input", AudioChannelSet::stereo(), true);
+   #endif
+    b = b.withOutput ("Main", AudioChannelSet::stereo(), true);
     for (int i = 1; i < omni::kOutputs; ++i) b = b.withOutput ("Out " + String (i + 1), AudioChannelSet::stereo(), extraOn);
     return b;
 }
 
-OmniProcessor::OmniProcessor()
-    : AudioProcessor (makeBuses()),
-      apvts (*this, nullptr, "Omnisampler", createLayout())
+OmniProcessor::OmniProcessor (bool isFx)
+    : AudioProcessor (makeBuses (isFx)),
+      apvts (*this, nullptr, "Omnisampler", createLayout()),
+      fx (isFx),
+      monitorInput (isFx)
 {
     current = std::make_shared<const Instrument>();
     engine.setStreamer (&streamer);
-    startTimer (500);
+    startTimer (60);
 }
 
-OmniProcessor::~OmniProcessor() { stopTimer(); }
+OmniProcessor::~OmniProcessor()
+{
+    stopTimer();
+    autoSampler.cancel();
+   #if OMNI_HOSTING
+    alive->store (false);
+    hostedInst.reset();
+   #endif
+}
 
 bool OmniProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
@@ -51,30 +70,89 @@ bool OmniProcessor::isBusesLayoutSupported (const BusesLayout& l) const
     if (out != AudioChannelSet::stereo() && out != AudioChannelSet::mono()) return false;
     for (int i = 1; i < l.outputBuses.size(); ++i)
         if (! l.outputBuses[i].isDisabled() && l.outputBuses[i] != AudioChannelSet::stereo()) return false;
+    if (l.inputBuses.size() > 0)
+    {
+        const auto& in = l.getMainInputChannelSet();
+        const bool monoOrStereo = in == AudioChannelSet::mono() || in == AudioChannelSet::stereo();
+        if (fx) { if (! monoOrStereo || in.size() > out.size()) return false; }
+        else if (! in.isDisabled() && ! monoOrStereo) return false;
+    }
     return true;
 }
 
 void OmniProcessor::prepareToPlay (double sr, int block)
 {
+    // A real-time Auto Sampler run can't carry on across a change of sample rate.
+    if (autoSampler.state() == AutoSampler::State::Running) autoSampler.cancel();
+    rateNow = sr; blockNow = jmax (16, block);
     engine.prepare (sr, jmax (512, block));
     master.reset (sr, 0.05);
     keyboardState.reset();
     padState.reset();
     localPads.ensureSize (2048);
     localKeys.ensureSize (2048);
+    autoMidi.ensureSize (2048);
+    inBuf.setSize (2, jmax (8192, block));
+    inBuf.clear();
+    recorder.prepare (sr);
+   #if OMNI_HOSTING
+    hostMidi.ensureSize (2048);
+    const SpinLock::ScopedLockType hl (hostLock);
+    if (hostedInst != nullptr)
+    {
+        hostedInst->setRateAndBufferSizeDetails (sr, block);
+        hostedInst->prepareToPlay (sr, block);
+        hostBuf.setSize (jmax (2, hostedInst->getTotalNumInputChannels(), hostedInst->getTotalNumOutputChannels()), jmax (16, block));
+    }
+   #endif
 }
 
 void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
 {
     ScopedNoDenormals noDenormals;
-    buffer.clear();
     const int n = buffer.getNumSamples();
+
+    // Keep the input (Omnisampler FX, or the standalone app's audio input) before the buffer is reused for the output.
+    const int inCh = jmin (getMainBusNumInputChannels(), buffer.getNumChannels());
+    const bool haveIn = inCh > 0 && n <= inBuf.getNumSamples();
+    float* inL = inBuf.getWritePointer (0);
+    float* inR = inBuf.getWritePointer (1);
+    const int inFrames = jmin (n, inBuf.getNumSamples());
+    if (haveIn)
+    {
+        FloatVectorOperations::copy (inL, buffer.getReadPointer (0), n);
+        FloatVectorOperations::copy (inR, buffer.getReadPointer (inCh > 1 ? 1 : 0), n);
+    }
+    else { FloatVectorOperations::clear (inL, inFrames); FloatVectorOperations::clear (inR, inFrames); }
+    buffer.clear();
     {
         GenericScopedTryLock<SpinLock> lock (instLock);
         if (lock.isLocked()) engine.setInstrument (current);
     }
     const int padsCh = padsChannel(), keysCh = keysChannel();
     engine.setOffline (isNonRealtime());
+
+    // Recording and the Auto Sampler listen to the input; the Auto Sampler also sends its notes.
+    autoMidi.clear();
+    if (haveIn)
+    {
+        Recorder::Transport tr;
+        if (auto* ph = getPlayHead())
+            if (const auto pos = ph->getPosition())
+            {
+                const auto ppq = pos->getPpqPosition();
+                const auto bpm = pos->getBpm();
+                if (ppq.hasValue() && bpm.hasValue())
+                {
+                    tr.valid = true; tr.playing = pos->getIsPlaying(); tr.ppq = *ppq; tr.bpm = *bpm;
+                    if (const auto sig = pos->getTimeSignature()) tr.quartersPerBar = sig->numerator * 4.0 / jmax (1, sig->denominator);
+                    const auto bar = pos->getPpqPositionOfLastBarStart();
+                    tr.barStartPpq = bar.hasValue() ? *bar : std::floor (*ppq / tr.quartersPerBar) * tr.quartersPerBar;
+                }
+            }
+        recorder.process (inL, inR, n, tr);
+        autoSampler.process (inL, inR, n, autoMidi);
+    }
 
     // Where each output's channels start in this block's buffer (-1 = output off -> main).
     // The standalone app only plays its Main output, so everything goes there.
@@ -89,12 +167,25 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     }
     if (busCh[0] < 0) busCh[0] = 0;
 
+   #if OMNI_HOSTING
+    const bool aud = audition.load();   // a loaded plug-in is being auditioned: it gets what the Keys would
+    hostMidi.clear();
+   #else
+    const bool aud = false;
+   #endif
+
     // On-screen pads and keyboard go straight to their own section, whatever the channel settings are.
     localPads.clear(); localKeys.clear();
     padState.processNextMidiBuffer (localPads, 0, n, true);
     keyboardState.processNextMidiBuffer (localKeys, 0, n, true);
     for (const auto meta : localPads) engine.handleLocal (meta.getMessage(), true);
-    for (const auto meta : localKeys) engine.handleLocal (meta.getMessage(), false);
+    for (const auto meta : localKeys)
+    {
+       #if OMNI_HOSTING
+        if (aud) { hostMidi.addEvent (meta.getMessage(), jlimit (0, jmax (0, n - 1), meta.samplePosition)); continue; }
+       #endif
+        engine.handleLocal (meta.getMessage(), false);
+    }
 
     // MIDI from a controller or the host is split by channel.
     int pos = 0;
@@ -103,13 +194,14 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
         const int at = jlimit (0, n, meta.samplePosition);
         if (at > pos) { engine.render (buffer, pos, at - pos, busCh, kOutputs); pos = at; }
         const auto msg = meta.getMessage();
-        engine.handleMidi (msg, padsCh, keysCh);
-        if (msg.isNoteOnOrOff())
-        {
-            bool toPads, toKeys;
-            Engine::route (msg.getChannel(), padsCh, keysCh, toPads, toKeys);
-            if (toKeys) keyboardState.processNextMidiEvent (msg);   // light the on-screen key
-        }
+        bool toPads = false, toKeys = false;
+        if (msg.isNoteOnOrOff()) Engine::route (msg.getChannel(), padsCh, keysCh, toPads, toKeys);
+        if (! aud || ! msg.isNoteOnOrOff()) engine.handleMidi (msg, padsCh, keysCh);
+        else if (toPads) engine.handleLocal (msg, true);
+       #if OMNI_HOSTING
+        if (aud && (toKeys || ! msg.isNoteOnOrOff())) hostMidi.addEvent (msg, jlimit (0, jmax (0, n - 1), at));
+       #endif
+        if (toKeys) keyboardState.processNextMidiEvent (msg);   // light the on-screen key
     }
     if (pos < n) engine.render (buffer, pos, n - pos, busCh, kOutputs);
 
@@ -120,6 +212,23 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
         for (int c = 0; c < buffer.getNumChannels(); ++c) buffer.getWritePointer (c)[i] *= g;
     }
     voiceCount.store (engine.activeVoices());
+
+   #if OMNI_HOSTING
+    if (aud) renderHosted (buffer, busCh[0], n);
+   #endif
+    // The input passes through untouched (always in Omnisampler FX unless it is switched off).
+    if (haveIn && monitorInput.load())
+    {
+        const int c = jlimit (0, jmax (0, buffer.getNumChannels() - 1), busCh[0]);
+        if (c + 1 < buffer.getNumChannels()) { buffer.addFrom (c, 0, inL, n); buffer.addFrom (c + 1, 0, inR, n); }
+        else { buffer.addFrom (c, 0, inL, n, 0.5f); buffer.addFrom (c, 0, inR, n, 0.5f); }
+    }
+    // Omnisampler FX has a MIDI output: only the Auto Sampler's notes go out, never an echo of what came in.
+    if (fx)
+    {
+        midi.clear();
+        if (! autoMidi.isEmpty()) midi.addEvents (autoMidi, 0, n, 0);
+    }
 }
 
 void OmniProcessor::swapIn (InstrumentPtr p)
@@ -137,6 +246,8 @@ void OmniProcessor::swapIn (InstrumentPtr p)
 
 void OmniProcessor::timerCallback()
 {
+    pollSampling();
+    if (++timerTicks % 8 != 0) return;
     const auto now = Time::getMillisecondCounter();
     const ScopedLock sl (graveLock);
     graveyard.erase (std::remove_if (graveyard.begin(), graveyard.end(),
@@ -255,6 +366,7 @@ void OmniProcessor::getStateInformation (MemoryBlock& dest)
     xml->setAttribute ("stateVersion", kStateVersion);
     xml->setAttribute ("streaming", isStreaming());
     xml->setAttribute ("touchVelocity", touchVelocity.load());
+    if (hasAudioInput()) xml->setAttribute ("monitor", monitorInput.load());
     xml->addChildElement (instrumentToXml (*current).release());
     copyXmlToBinary (*xml, dest);
 }
@@ -267,6 +379,7 @@ void OmniProcessor::setStateInformation (const void* data, int size)
     xml->removeAttribute ("streaming");
     touchVelocity = xml->getBoolAttribute ("touchVelocity", false);
     xml->removeAttribute ("touchVelocity");
+    if (xml->hasAttribute ("monitor")) { monitorInput = xml->getBoolAttribute ("monitor", fx); xml->removeAttribute ("monitor"); }
     if (auto* inst = xml->getChildByName ("Omnisampler"))
     {
         StringArray missing;
