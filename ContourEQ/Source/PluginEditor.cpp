@@ -408,7 +408,8 @@ void EqDisplay::showBandMenu (int b)
     m.addSeparator();
     m.addItem (3, "Remove band");
     juce::Component::SafePointer<EqDisplay> safe (this);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea ({ juce::Desktop::getMousePosition(), juce::Desktop::getMousePosition() }),
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea ({ juce::Desktop::getMousePosition(), juce::Desktop::getMousePosition() })
+                                               .withParentComponent (look::menuParent (this)),
         [safe, b, dyn] (int r)
         {
             if (safe == nullptr || r == 0) return;

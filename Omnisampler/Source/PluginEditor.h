@@ -137,7 +137,6 @@ public:
     void selectKeyZone (int z);
     void refreshAll();
     void showMessage (const juce::String& title, const juce::String& text);
-    void presentAlert (juce::AlertWindow* w, std::function<void (int)> done);
     void addSynthLayerMenu (juce::Component& target);   // popup of drum models, adds a synth layer to the selected pad
     void browsePadSamples (int pad);   // file picker, then load onto that pad
     void openInstrument (const juce::File& f) { instrumentChosen (f); }   // a kit, an instrument file or a folder

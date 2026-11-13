@@ -10,7 +10,7 @@ static void styleSmallKnob (look::Knob& k)
 
 static void message (Component* c, const String& title, const String& text)
 {
-    AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, title, text, "OK", c);
+    look::showMessage (c, title, text, MessageBoxIconType::WarningIcon);
 }
 
 // =============================================================================================
@@ -204,14 +204,14 @@ LibraryPanel::LibraryPanel (CaptureRackProcessor& p, CaptureRackEditor& e) : pro
         w->addTextEditor ("name", "", "Name");
         w->addButton ("Create", 1, KeyPress (KeyPress::returnKey));
         w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
-        w->enterModalState (true, ModalCallbackFunction::create ([this, w] (int r)
+        look::presentAlert (this, w, [this, w] (int r)
         {
             if (r == 1 && w->getTextEditorContents ("name").trim().isNotEmpty())
             {
                 proc.library.addCategory (w->getTextEditorContents ("name"));
                 reload();
             }
-        }), true);
+        });
     };
     importBtn.onClick = [this]
     {

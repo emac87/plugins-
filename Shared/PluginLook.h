@@ -169,4 +169,45 @@ namespace look
         g.setColour (outline);
         g.drawRoundedRectangle (r.reduced (0.5f), corner, 1.0f);
     }
+
+    // ---- iPhone/iPad: a plug-in (AUv3) can't open windows of its own -------------------------
+    // Parent for a pop-up menu shown at a screen position (no target component): the plug-in's
+    // own view on iOS, a normal window elsewhere.
+    inline juce::Component* menuParent (juce::Component* c)
+    {
+       #if JUCE_IOS
+        return c != nullptr ? c->getTopLevelComponent() : nullptr;
+       #else
+        juce::ignoreUnused (c);
+        return nullptr;
+       #endif
+    }
+
+    // Shows an AlertWindow modally (it deletes itself). On iOS it goes inside the plug-in's view.
+    inline void presentAlert (juce::Component* owner, juce::AlertWindow* w, std::function<void (int)> done = {})
+    {
+       #if JUCE_IOS
+        if (auto* top = owner != nullptr ? owner->getTopLevelComponent() : nullptr)
+        {
+            w->removeFromDesktop();
+            top->addAndMakeVisible (w);
+            w->setCentrePosition (top->getLocalBounds().getCentre());
+        }
+       #else
+        juce::ignoreUnused (owner);
+       #endif
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([done] (int r) { if (done) done (r); }), true);
+    }
+
+    inline void showMessage (juce::Component* owner, const juce::String& title, const juce::String& text,
+                             juce::MessageBoxIconType icon = juce::MessageBoxIconType::InfoIcon)
+    {
+       #if JUCE_IOS
+        auto* w = new juce::AlertWindow (title, text, icon, owner);
+        w->addButton ("OK", 0, juce::KeyPress (juce::KeyPress::returnKey));
+        presentAlert (owner, w);
+       #else
+        juce::AlertWindow::showMessageBoxAsync (icon, title, text, "OK", owner);
+       #endif
+    }
 }

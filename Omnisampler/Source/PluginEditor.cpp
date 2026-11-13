@@ -761,24 +761,7 @@ int OmniEditor::playChannel (bool pads) const
 
 void OmniEditor::showMessage (const String& title, const String& text)
 {
-   #if JUCE_IOS
-    auto* w = new AlertWindow (title, text, MessageBoxIconType::InfoIcon, this);
-    w->addButton ("OK", 0, KeyPress (KeyPress::returnKey));
-    presentAlert (w, nullptr);
-   #else
-    AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, title, text, "OK", this);
-   #endif
-}
-
-// iPhone/iPad: a plug-in can't open windows of its own, so alerts go inside the editor.
-void OmniEditor::presentAlert (AlertWindow* w, std::function<void (int)> done)
-{
-   #if JUCE_IOS
-    w->removeFromDesktop();
-    addAndMakeVisible (w);
-    w->setCentrePosition (getLocalBounds().getCentre());
-   #endif
-    w->enterModalState (true, ModalCallbackFunction::create ([done] (int r) { if (done) done (r); }), true);
+    look::showMessage (this, title, text);
 }
 
 void OmniEditor::setSampleView()
@@ -953,7 +936,7 @@ void OmniEditor::askNameThen (const String& title, const String& initial, std::f
     w->addTextEditor ("name", initial);
     w->addButton ("Save", 1, KeyPress (KeyPress::returnKey));
     w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
-    presentAlert (w, [w, then] (int r)
+    look::presentAlert (this, w, [w, then] (int r)
     {
         const auto name = File::createLegalFileName (w->getTextEditorContents ("name").trim());
         if (r == 1 && name.isNotEmpty()) then (name);
