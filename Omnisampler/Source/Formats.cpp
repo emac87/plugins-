@@ -42,9 +42,36 @@ namespace omni
         if (r == nullptr) { error = "Can't read: " + f.getFileName(); return nullptr; }
         auto s = std::make_shared<Sample>();
         const int ch = (int) jmin (2u, r->numChannels);
-        const int len = (int) jmin<int64> (r->lengthInSamples, (int64) (r->sampleRate * 600.0));
-        s->data.setSize (ch, len);
-        r->read (&s->data, 0, len, 0, true, ch > 1);
+        const int len = (int) jmin<int64> (r->lengthInSamples, (int64) (r->sampleRate * 3600.0));
+        s->numChannels = ch;
+        s->totalFrames = len;
+        s->streamed = streaming.load() && len > jmax ((double) kHeadFrames * 2, r->sampleRate * streamSeconds);
+        if (s->streamed)
+        {
+            // Keep the head in memory, and a small overview of the whole file for drawing.
+            s->data.setSize (ch, kHeadFrames);
+            r->read (&s->data, 0, kHeadFrames, 0, true, ch > 1);
+            const int step = Sample::kOverviewStep;
+            s->overview.setSize (1, len / step + 1);
+            s->overview.clear();
+            AudioBuffer<float> chunk (ch, step * 256);
+            for (int pos = 0; pos < len; pos += chunk.getNumSamples())
+            {
+                const int n = jmin (chunk.getNumSamples(), len - pos);
+                r->read (&chunk, 0, n, pos, true, ch > 1);
+                for (int k = 0; k * step < n; ++k)
+                {
+                    float m = 0.0f;
+                    for (int c = 0; c < ch; ++c) m = jmax (m, chunk.getMagnitude (c, k * step, jmin (step, n - k * step)));
+                    s->overview.setSample (0, (pos + k * step) / step, m);
+                }
+            }
+        }
+        else
+        {
+            s->data.setSize (ch, len);
+            r->read (&s->data, 0, len, 0, true, ch > 1);
+        }
         s->sampleRate = r->sampleRate;
         s->file = f;
         const auto& md = r->metadataValues;
@@ -302,7 +329,7 @@ namespace omni
         {
             z.loop = true;
             z.loopStart = ls >= 0 ? ls : jmax (0, z.sample->metaLoopStart);
-            z.loopEnd = le > 0 ? le : (z.sample->metaLoopEnd > 0 ? z.sample->metaLoopEnd : z.sample->data.getNumSamples() - 1);
+            z.loopEnd = le > 0 ? le : (z.sample->metaLoopEnd > 0 ? z.sample->metaLoopEnd : z.sample->length() - 1);
         }
         z.loKey = jlimit (0, 127, z.loKey); z.hiKey = jlimit (z.loKey, 127, z.hiKey); z.root = jlimit (0, 127, z.root);
         ok = true;
@@ -455,7 +482,7 @@ namespace omni
                 {
                     z.loop = true;
                     z.loopStart = ls >= 0 ? ls : jmax (0, z.sample->metaLoopStart);
-                    z.loopEnd = le > 0 ? le : (z.sample->metaLoopEnd > 0 ? z.sample->metaLoopEnd : z.sample->data.getNumSamples() - 1);
+                    z.loopEnd = le > 0 ? le : (z.sample->metaLoopEnd > 0 ? z.sample->metaLoopEnd : z.sample->length() - 1);
                 }
                 if (! envTaken)
                 {
@@ -597,11 +624,23 @@ namespace omni
             e->setAttribute ("index", i); e->setAttribute ("note", p.note); e->setAttribute ("name", p.name);
             e->setAttribute ("choke", p.chokeGroup); e->setAttribute ("oneshot", p.oneShot);
             voicingToXml (p.voicing, *e);
+            if (p.output != 0) e->setAttribute ("out", p.output);
+            if (p.sampleLevelDb != 0.0f) e->setAttribute ("slevel", p.sampleLevelDb);
             zonesToXml (p.zones, *e);
+            for (auto& l : p.synths)
+            {
+                auto* y = e->createNewChildElement ("Synth");
+                y->setAttribute ("model", (int) l.model); y->setAttribute ("on", l.on);
+                y->setAttribute ("level", l.levelDb); y->setAttribute ("pan", l.pan); y->setAttribute ("tune", l.tuneSemis);
+                y->setAttribute ("decay", l.decay); y->setAttribute ("tone", l.tone); y->setAttribute ("penv", l.pitchEnv);
+                y->setAttribute ("pdecay", l.pitchDecay); y->setAttribute ("click", l.click); y->setAttribute ("noise", l.noise);
+                y->setAttribute ("drive", l.drive); y->setAttribute ("vs", l.velSens);
+            }
         }
         auto* k = x->createNewChildElement ("Keys");
         k->setAttribute ("name", inst.keys.name);
         voicingToXml (inst.keys.voicing, *k);
+        if (inst.keys.output != 0) k->setAttribute ("out", inst.keys.output);
         zonesToXml (inst.keys.zones, *k);
         return x;
     }
@@ -617,12 +656,28 @@ namespace omni
             p.note = e->getIntAttribute ("note", p.note); p.name = e->getStringAttribute ("name");
             p.chokeGroup = e->getIntAttribute ("choke"); p.oneShot = e->getBoolAttribute ("oneshot", true);
             voicingFromXml (p.voicing, *e);
+            p.output = jlimit (0, kOutputs - 1, e->getIntAttribute ("out", 0));
+            p.sampleLevelDb = (float) e->getDoubleAttribute ("slevel", 0.0);
             p.zones = zonesFromXml (*e, cache, missing);
+            for (auto* y : e->getChildWithTagNameIterator ("Synth"))
+            {
+                if ((int) p.synths.size() >= kMaxSynthLayers) break;
+                SynthLayer l;
+                l.model = (DrumModel) jlimit (0, (int) DrumModel::NumModels - 1, y->getIntAttribute ("model", 0));
+                l.on = y->getBoolAttribute ("on", true);
+                auto f = [y] (const char* n, float d) { return (float) y->getDoubleAttribute (n, d); };
+                l.levelDb = f ("level", l.levelDb); l.pan = f ("pan", l.pan); l.tuneSemis = f ("tune", l.tuneSemis);
+                l.decay = f ("decay", l.decay); l.tone = f ("tone", l.tone); l.pitchEnv = f ("penv", l.pitchEnv);
+                l.pitchDecay = f ("pdecay", l.pitchDecay); l.click = f ("click", l.click); l.noise = f ("noise", l.noise);
+                l.drive = f ("drive", l.drive); l.velSens = f ("vs", l.velSens);
+                p.synths.push_back (l);
+            }
         }
         if (auto* k = x.getChildByName ("Keys"))
         {
             inst.keys.name = k->getStringAttribute ("name");
             voicingFromXml (inst.keys.voicing, *k);
+            inst.keys.output = jlimit (0, kOutputs - 1, k->getIntAttribute ("out", 0));
             inst.keys.zones = zonesFromXml (*k, cache, missing);
         }
         return inst;

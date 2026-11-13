@@ -20,7 +20,14 @@ target_sources(Omnisampler PRIVATE
     Source/Formats.cpp
     Source/Engine.cpp
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/Streamer.cpp
+    Source/DrumSynth.cpp
+    Source/Sf2.cpp
+    Source/Exs.cpp
+    Source/Ableton.cpp
+    Source/Kontakt.cpp
+    Source/DsExport.cpp)
 
 if(IOS)
     # iPhone/iPad: the system file picker, with picked files copied into the app's own storage.

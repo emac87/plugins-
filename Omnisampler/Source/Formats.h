@@ -2,6 +2,7 @@
 // Loading samples and instruments: audio files, SFZ, DecentSampler, kits; plus the smart mapper.
 #include "Model.h"
 #include <map>
+#include <atomic>
 
 namespace omni
 {
@@ -12,6 +13,10 @@ namespace omni
         SampleCache() { formats.registerBasicFormats(); }
         SamplePtr get (const juce::File& f, juce::String& error);
         juce::AudioFormatManager formats;
+        // Disk streaming: files longer than streamSeconds keep only the first kHeadFrames in memory.
+        std::atomic<bool> streaming { true };
+        double streamSeconds = 4.0;
+        static constexpr int kHeadFrames = 1 << 16;
     private:
         std::map<juce::String, std::weak_ptr<const Sample>> cache;
     };

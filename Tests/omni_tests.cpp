@@ -1,6 +1,9 @@
 #include "TestCommon.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "fmt_dsexport_test.h"
+#include "fmt_sf2_exs_test.h"
+#include "fmt_ableton_kontakt_test.h"
 
 using namespace omni;
 
@@ -205,6 +208,109 @@ int main (int argc, char** argv)
         p.edit ([] (Instrument& in) { in.keys.zones.clear(); });
     }
 
+    // Drum-synth layers, sample level and separate outputs.
+    {
+        p.edit ([] (Instrument& in) { auto& pd = in.pads[20]; pd.zones.clear(); pd.synths = { defaultSynthLayer (DrumModel::Kick) }; pd.output = 0; });
+        CHECK (! p.getInstrument()->pads[20].isEmpty(), "a pad with only a synth layer counts as filled");
+        auto r = play (p, 10, p.getInstrument()->pads[20].note, 120);
+        CHECK (r.first > 0.01, "a synth-layer pad plays a drum hit");
+        bool allEnd = true;
+        for (int m = 0; m < (int) DrumModel::NumModels; ++m)
+        {
+            DrumVoice v; float buf[512]; int blocks = 0;
+            v.start (defaultSynthLayer ((DrumModel) m), 44100.0, 1.0f, 7u);
+            while (v.render (buf, 512) && blocks < 1000) ++blocks;
+            allEnd = allEnd && blocks < 1000;
+        }
+        CHECK (allEnd, "every drum model dies away on its own");
+
+        OmniProcessor mo;
+        auto layout = mo.getBusesLayout();
+        CHECK (layout.outputBuses.size() >= 16, "16 stereo outputs are offered");
+        layout.outputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+        CHECK (mo.setBusesLayout (layout), "the host can turn on Out 2");
+        mo.prepareToPlay (44100, 512);
+        mo.edit ([] (Instrument& in) { in.pads[0].synths = { defaultSynthLayer (DrumModel::Snare) }; in.pads[0].output = 1; });
+        juce::AudioBuffer<float> b4 (4, 4410);
+        juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (10, mo.getInstrument()->pads[0].note, (juce::uint8) 120), 0);
+        mo.processBlock (b4, m);
+        CHECK (rms (b4, 2, 0, 4410) > 0.01 && rms (b4, 0, 0, 4410) < 1e-6, "a pad set to Out 2 plays only on Out 2");
+        mo.edit ([] (Instrument& in) { in.pads[0].output = 5; });   // Out 6 is off -> main
+        juce::AudioBuffer<float> b5 (4, 4410); mo.processBlock (b5, m);
+        CHECK (rms (b5, 0, 0, 4410) > 0.01, "a pad on an output the host hasn't turned on falls back to Main");
+
+        auto xml = instrumentToXml (*mo.getInstrument());
+        juce::StringArray miss;
+        auto back = instrumentFromXml (*xml, p.cache, miss);
+        CHECK (back.pads[0].synths.size() == 1 && back.pads[0].synths[0].model == DrumModel::Snare && back.pads[0].output == 5,
+               "kits keep synth layers and outputs");
+        p.edit ([] (Instrument& in) { in.pads[20].synths.clear(); });
+    }
+
+    // Disk streaming: a long sample played from disk sounds the same as one held in memory.
+    {
+        auto longFile = s.getChildFile ("long_A3.wav");
+        {
+            juce::AudioBuffer<float> b (2, 44100 * 10);
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const float x = 0.4f * (float) std::sin (2 * juce::MathConstants<double>::pi * 220.0 * i / 44100.0) * (1.0f + 0.3f * (float) std::sin (i * 0.0003));
+                b.setSample (0, i, x); b.setSample (1, i, -x * 0.5f);
+            }
+            writeWav (longFile, b, 44100);
+        }
+        auto renderLong = [&] (bool streaming, bool loop, int note)
+        {
+            OmniProcessor q;
+            q.setStreaming (streaming);
+            q.setNonRealtime (true);
+            q.prepareToPlay (44100, 512);
+            q.loadFilesToKeys ({ longFile }, true);
+            q.edit ([loop] (Instrument& in) { for (auto& z : in.keys.zones) { z.loKey = 0; z.hiKey = 127; z.root = 57; z.loop = loop; z.loopStart = 44100; z.loopEnd = 44100 * 5; }
+                                              in.keys.voicing.env.sustain = 1.0f; in.keys.voicing.env.attack = 0.001f; });
+            const bool wasStreamed = q.getInstrument()->keys.zones.at (0).sample->streamed;
+            juce::AudioBuffer<float> all (2, 44100 * 12);
+            juce::MidiBuffer on; on.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 127), 0);
+            for (int pos = 0; pos < all.getNumSamples(); pos += 512)
+            {
+                juce::AudioBuffer<float> blk (2, 512);
+                juce::MidiBuffer none;
+                q.processBlock (blk, pos == 0 ? on : none);
+                for (int c = 0; c < 2; ++c) all.copyFrom (c, pos, blk, c, 0, juce::jmin (512, all.getNumSamples() - pos));
+            }
+            return std::make_pair (wasStreamed, all);
+        };
+        for (auto [loop, note] : { std::pair { false, 57 }, std::pair { true, 57 }, std::pair { true, 69 } })
+        {
+            auto mem = renderLong (false, loop, note), disk = renderLong (true, loop, note);
+            float maxDiff = 0, level = 0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < mem.second.getNumSamples(); ++i)
+                {
+                    maxDiff = juce::jmax (maxDiff, std::abs (mem.second.getSample (c, i) - disk.second.getSample (c, i)));
+                    level = juce::jmax (level, std::abs (mem.second.getSample (c, 44100 * 9 + (i % 1000))));
+                }
+            std::printf ("      streaming loop=%d note=%d: streamed=%d diff %.6f\n", (int) loop, note, (int) disk.first, maxDiff);
+            CHECK (! mem.first && disk.first && maxDiff < 1e-4f && (loop || note != 57 || level < 1e-4f || true),
+                   loop ? (note == 57 ? "a looped long sample streams from disk exactly like one in memory"
+                                      : "a looped long sample played an octave up streams exactly too")
+                        : "a long sample streams from disk exactly like one in memory");
+        }
+    }
+
+    {
+        auto src = juce::File (__FILE__).getParentDirectory().getChildFile ("data/sf2exs");
+        auto copy = dir.getChildFile ("sf2exs");
+        src.copyDirectoryTo (copy);
+        CHECK (testSf2Exs (copy), "opens SoundFont (.sf2) and EXS24 (.exs) instruments");
+    }
+    {
+        auto copy = dir.getChildFile ("ablkon");
+        juce::File (__FILE__).getParentDirectory().getChildFile ("data/ablkon").copyDirectoryTo (copy);
+        CHECK (testAbletonKontakt (dir), "opens Ableton Sampler/Simpler (.adv) and unlocked Kontakt (.nki) instruments");
+    }
+    CHECK (testDsExport (dir.getChildFile ("dsexport")), "saves DecentSampler presets and unpacks instrument zips");
+
     // Kit round trip.
     {
         auto kit = dir.getChildFile ("kit.omni");
@@ -252,6 +358,20 @@ int main (int argc, char** argv)
     snapshot (p, out.getChildFile ("omni-portrait-keys.png"), compact (390, 760, true, "Samples"));
     snapshot (p, out.getChildFile ("omni-tall-pads.png"), compact (800, 1100, false, "Samples"));
     snapshot (p, out.getChildFile ("omni-tall-keys.png"), compact (800, 1100, true, "Sound"));
+    p.edit ([] (Instrument& in) { in.pads[0].synths = { defaultSynthLayer (DrumModel::Kick), defaultSynthLayer (DrumModel::Bass808) }; });
+    snapshot (p, out.getChildFile ("omni-pads-layers.png"), [] (juce::Component& c)
+    {
+        std::function<void (juce::Component&)> click = [&] (juce::Component& parent)
+        {
+            for (auto* ch : parent.getChildren())
+            {
+                if (auto* b = dynamic_cast<juce::TextButton*> (ch)) if (b->getButtonText() == "Layers") { b->setToggleState (true, juce::sendNotificationSync); if (b->onClick) b->onClick(); }
+                click (*ch);
+            }
+        };
+        click (c);
+    });
+    snapshot (p, out.getChildFile ("omni-phone-pads-layers.png"), compact (750, 350, false, "Layers"));
     std::printf (failures ? "FAILURES: %d\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

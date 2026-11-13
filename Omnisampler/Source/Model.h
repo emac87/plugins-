@@ -9,6 +9,8 @@ namespace omni
 {
     constexpr int kPads = 64;          // 4 banks of 16
     constexpr int kPadsPerBank = 16;
+    constexpr int kOutputs = 16;       // stereo outputs: 0 = main, 1..15 = Out 2..16
+    constexpr int kMaxSynthLayers = 4; // drum-synth layers per pad
 
     struct Sample
     {
@@ -18,6 +20,19 @@ namespace omni
         float peakDb = -100.0f, loudDb = -100.0f;   // loudDb: loudest 10 ms RMS (used for velocity mapping)
         int metaRoot = -1;                          // from WAV/AIFF metadata, -1 if none
         int metaLoopStart = -1, metaLoopEnd = -1;
+
+        // Disk streaming: long files keep only their first `data.getNumSamples()` frames in memory
+        // and the rest is read from disk while a voice plays (see Streamer.h).
+        bool streamed = false;
+        int totalFrames = 0;                        // whole file length (== data length when not streamed)
+        int numChannels = 1;
+        juce::AudioBuffer<float> overview;          // streamed only: 1 frame per kOverviewStep frames, max |x|, for drawing
+        static constexpr int kOverviewStep = 256;
+
+        int length() const noexcept { return streamed ? totalFrames : data.getNumSamples(); }
+        // For waveform drawing: a buffer plus how many file frames each of its frames stands for.
+        const juce::AudioBuffer<float>& drawData() const noexcept { return streamed ? overview : data; }
+        int drawStep() const noexcept { return streamed ? kOverviewStep : 1; }
     };
     using SamplePtr = std::shared_ptr<const Sample>;
 
@@ -49,6 +64,24 @@ namespace omni
         RRMode rr = RRMode::Sequential;
     };
 
+    // A drum-synth layer (the Strata Drums engines). Plays alongside a pad's samples.
+    enum class DrumModel { Kick, Snare, Tom, ClosedHat, OpenHat, Cymbal, Clap, Perc, Noise, Bass808, NumModels };
+    struct SynthLayer
+    {
+        DrumModel model = DrumModel::Kick;
+        bool on = true;
+        float levelDb = 0.0f, pan = 0.0f;
+        float tuneSemis = 0.0f;         // relative to the model's own base pitch
+        float decay = 0.4f;             // seconds, main amplitude decay (0.02..4)
+        float tone = 0.5f;              // 0..1, dark..bright (model-specific)
+        float pitchEnv = 0.5f;          // 0..1, amount of pitch drop at the start (kick/tom/808/perc)
+        float pitchDecay = 0.05f;       // seconds
+        float click = 0.3f;             // 0..1, transient/click layer level
+        float noise = 0.2f;             // 0..1, noise amount (snare wires, hat/cymbal body, clap)
+        float drive = 0.0f;             // 0..1, saturation
+        float velSens = 0.8f;           // 0 = velocity ignored, 1 = full range
+    };
+
     struct Pad
     {
         juce::String name;
@@ -57,6 +90,11 @@ namespace omni
         Voicing voicing;
         int chokeGroup = 0;             // 0 = none
         bool oneShot = true;
+        std::vector<SynthLayer> synths; // up to kMaxSynthLayers, played with the samples
+        float sampleLevelDb = 0.0f;     // level of the sample layers against the synth layers
+        int output = 0;                 // 0 = main, 1..15 = Out 2..16
+
+        bool isEmpty() const { return zones.empty() && synths.empty(); }
     };
 
     struct KeysMap
@@ -64,6 +102,7 @@ namespace omni
         juce::String name;
         std::vector<Zone> zones;
         Voicing voicing;
+        int output = 0;
     };
 
     struct Instrument

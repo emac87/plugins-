@@ -4,6 +4,8 @@
 #include "Model.h"
 #include "Formats.h"
 #include "Engine.h"
+#include "Streamer.h"
+#include "MoreFormats.h"
 
 class OmniProcessor : public juce::AudioProcessor, private juce::Timer
 {
@@ -36,6 +38,7 @@ public:
     juce::MidiKeyboardState keyboardState;   // on-screen keyboard (Keys only); also lights keys played over MIDI
     juce::MidiKeyboardState padState;        // on-screen pads (Pads only)
     omni::SampleCache cache;
+    omni::Streamer streamer;
     omni::Engine engine;
 
     omni::InstrumentPtr getInstrument() const { return current; }
@@ -45,7 +48,16 @@ public:
     // Loading. Each returns a message for the user ("" = fine).
     juce::String loadFilesToPad (int pad, const juce::Array<juce::File>& files, omni::DropMode mode);
     juce::String loadFilesToKeys (const juce::Array<juce::File>& files, bool replace);
-    juce::String loadInstrumentFile (const juce::File& f);   // .sfz / .dspreset / .dslibrary into Keys
+    juce::String loadInstrumentFile (const juce::File& f);   // .sfz / .dspreset / .dslibrary / .sf2 / .exs / .adv / .nki / .zip into Keys
+    juce::String saveKeysAsDecentSampler (const juce::File& f);
+    static bool canLoadInstrument (const juce::File& f) { return omni::isInstrumentFile (f) || omni::isMoreFormatsFile (f); }
+    static juce::String instrumentPatterns() { return "*.sfz;*.dspreset;*.dslibrary;*.sf2;*.exs;*.adv;*.nki;*.zip"; }
+
+    // Disk streaming of long samples (applies to samples loaded after the change).
+    void setStreaming (bool on) { cache.streaming = on; }
+    bool isStreaming() const { return cache.streaming.load(); }
+    int streamUnderruns() const { return streamer.underruns.load(); }
+    static juce::String outputName (int i) { return i == 0 ? juce::String ("Main") : "Out " + juce::String (i + 1); }
     juce::String loadKit (const juce::File& f);
     juce::String saveKit (const juce::File& f);
 
@@ -55,6 +67,7 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    static BusesProperties makeBuses();
     void timerCallback() override;
     void swapIn (omni::InstrumentPtr p);
 

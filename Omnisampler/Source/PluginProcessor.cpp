@@ -20,11 +20,22 @@ AudioProcessorValueTreeState::ParameterLayout OmniProcessor::createLayout()
     return l;
 }
 
+// Main stereo output plus Out 2..16 (off until the host turns them on, e.g. Logic's "Multi-Output").
+AudioProcessor::BusesProperties OmniProcessor::makeBuses()
+{
+    auto b = BusesProperties().withOutput ("Main", AudioChannelSet::stereo(), true);
+   #if ! JUCE_IOS
+    for (int i = 1; i < omni::kOutputs; ++i) b = b.withOutput ("Out " + String (i + 1), AudioChannelSet::stereo(), false);
+   #endif
+    return b;
+}
+
 OmniProcessor::OmniProcessor()
-    : AudioProcessor (BusesProperties().withOutput ("Output", AudioChannelSet::stereo(), true)),
+    : AudioProcessor (makeBuses()),
       apvts (*this, nullptr, "Omnisampler", createLayout())
 {
     current = std::make_shared<const Instrument>();
+    engine.setStreamer (&streamer);
     startTimer (500);
 }
 
@@ -33,12 +44,15 @@ OmniProcessor::~OmniProcessor() { stopTimer(); }
 bool OmniProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     const auto& out = l.getMainOutputChannelSet();
-    return out == AudioChannelSet::stereo() || out == AudioChannelSet::mono();
+    if (out != AudioChannelSet::stereo() && out != AudioChannelSet::mono()) return false;
+    for (int i = 1; i < l.outputBuses.size(); ++i)
+        if (! l.outputBuses[i].isDisabled() && l.outputBuses[i] != AudioChannelSet::stereo()) return false;
+    return true;
 }
 
-void OmniProcessor::prepareToPlay (double sr, int)
+void OmniProcessor::prepareToPlay (double sr, int block)
 {
-    engine.prepare (sr);
+    engine.prepare (sr, jmax (512, block));
     master.reset (sr, 0.05);
     keyboardState.reset();
     padState.reset();
@@ -56,6 +70,18 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
         if (lock.isLocked()) engine.setInstrument (current);
     }
     const int padsCh = padsChannel(), keysCh = keysChannel();
+    engine.setOffline (isNonRealtime());
+
+    // Where each output's channels start in this block's buffer (-1 = output off -> main).
+    int busCh[kOutputs];
+    for (int b = 0; b < kOutputs; ++b)
+    {
+        busCh[b] = -1;
+        if (b < getBusCount (false))
+            if (auto* bus = getBus (false, b); bus != nullptr && bus->isEnabled() && bus->getNumberOfChannels() > 0)
+                busCh[b] = getChannelIndexInProcessBlockBuffer (false, b, 0);
+    }
+    if (busCh[0] < 0) busCh[0] = 0;
 
     // On-screen pads and keyboard go straight to their own section, whatever the channel settings are.
     localPads.clear(); localKeys.clear();
@@ -69,7 +95,7 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     for (const auto meta : midi)
     {
         const int at = jlimit (0, n, meta.samplePosition);
-        if (at > pos) { engine.render (buffer, pos, at - pos); pos = at; }
+        if (at > pos) { engine.render (buffer, pos, at - pos, busCh, kOutputs); pos = at; }
         const auto msg = meta.getMessage();
         engine.handleMidi (msg, padsCh, keysCh);
         if (msg.isNoteOnOrOff())
@@ -79,7 +105,7 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
             if (toKeys) keyboardState.processNextMidiEvent (msg);   // light the on-screen key
         }
     }
-    if (pos < n) engine.render (buffer, pos, n - pos);
+    if (pos < n) engine.render (buffer, pos, n - pos, busCh, kOutputs);
 
     master.setTargetValue (Decibels::decibelsToGain (apvts.getRawParameterValue ("master")->load()));
     for (int i = 0; i < n; ++i)
@@ -146,7 +172,7 @@ String OmniProcessor::loadFilesToKeys (const Array<File>& files, bool replace)
     Array<File> audio;
     for (auto& f : files)
     {
-        if (isInstrumentFile (f)) return loadInstrumentFile (f);
+        if (canLoadInstrument (f)) return loadInstrumentFile (f);
         if (f.isDirectory()) audio.addArray (f.findChildFiles (File::findFiles, true, "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg"));
         else if (isAudioFile (f)) audio.add (f);
     }
@@ -172,15 +198,33 @@ String OmniProcessor::loadInstrumentFile (const File& f)
 {
     KeysMap km;
     km.voicing = current->keys.voicing;
+    km.output = current->keys.output;
     String err;
     bool ok = false;
-    if (f.hasFileExtension ("sfz")) ok = loadSfz (f, cache, km, err);
-    else if (f.hasFileExtension ("dspreset")) ok = loadDecentSampler (f, cache, km, err);
-    else if (f.hasFileExtension ("dslibrary")) ok = loadDsLibrary (f, cache, km, err);
+    File file = f;
+    if (file.hasFileExtension ("zip"))
+    {
+        file = unpackInstrumentZip (f, err);
+        if (file == File()) return err.isNotEmpty() ? err : String ("No instrument inside the zip");
+        err.clear();
+    }
+    if (file.hasFileExtension ("sfz")) ok = loadSfz (file, cache, km, err);
+    else if (file.hasFileExtension ("dspreset")) ok = loadDecentSampler (file, cache, km, err);
+    else if (file.hasFileExtension ("dslibrary")) ok = loadDsLibrary (file, cache, km, err);
+    else if (file.hasFileExtension ("sf2")) ok = loadSf2 (file, cache, km, err);
+    else if (file.hasFileExtension ("exs")) ok = loadExs (file, cache, km, err);
+    else if (file.hasFileExtension ("adv")) ok = loadAbleton (file, cache, km, err);
+    else if (file.hasFileExtension ("nki")) ok = loadKontakt (file, cache, km, err);
     else err = "Unsupported file type";
     if (! ok) return err.isNotEmpty() ? err : String ("Couldn't load");
     edit ([&] (Instrument& in) { in.keys = km; });
     return err;   // may hold a "some samples missing" note
+}
+
+String OmniProcessor::saveKeysAsDecentSampler (const File& f)
+{
+    String err;
+    return saveDecentSampler (current->keys, f, err) ? String() : (err.isNotEmpty() ? err : String ("Couldn't save"));
 }
 
 String OmniProcessor::loadKit (const File& f)
@@ -203,6 +247,7 @@ void OmniProcessor::getStateInformation (MemoryBlock& dest)
     auto state = apvts.copyState();
     auto xml = state.createXml();
     xml->setAttribute ("stateVersion", kStateVersion);
+    xml->setAttribute ("streaming", isStreaming());
     xml->addChildElement (instrumentToXml (*current).release());
     copyXmlToBinary (*xml, dest);
 }
@@ -211,6 +256,8 @@ void OmniProcessor::setStateInformation (const void* data, int size)
 {
     auto xml = getXmlFromBinary (data, size);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return;
+    setStreaming (xml->getBoolAttribute ("streaming", true));
+    xml->removeAttribute ("streaming");
     if (auto* inst = xml->getChildByName ("Omnisampler"))
     {
         StringArray missing;
