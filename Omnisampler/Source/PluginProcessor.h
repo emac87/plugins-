@@ -64,6 +64,9 @@ public:
     int padsChannel() const { return (int) apvts.getRawParameterValue ("padsch")->load(); }
     int keysChannel() const { return (int) apvts.getRawParameterValue ("keysch")->load(); }
     std::atomic<int> voiceCount { 0 };
+    // On-screen pads and keys: true = how hard you hit depends on where you tap; false = fixed velocity.
+    std::atomic<bool> touchVelocity { false };
+    bool hasOutputPicker() const { return wrapperType != wrapperType_Standalone; }
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();

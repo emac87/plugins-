@@ -372,6 +372,43 @@ int main (int argc, char** argv)
         click (c);
     });
     snapshot (p, out.getChildFile ("omni-phone-pads-layers.png"), compact (750, 350, false, "Layers"));
+    // On-screen pads: a tap plays the pad at once (a synth-only pad too), and with touch velocity on,
+    // a tap near the top is louder than one near the bottom. The setting is saved with the session.
+    {
+        OmniProcessor q;
+        q.prepareToPlay (44100.0, 512);
+        q.edit ([] (Instrument& in) { in.pads[0].synths = { defaultSynthLayer (DrumModel::Snare) }; });
+        std::unique_ptr<juce::AudioProcessorEditor> ed (q.createEditor());
+        PadButton* pad0 = nullptr;
+        for (auto* ch : ed->getChildren()) if (auto* pb = dynamic_cast<PadButton*> (ch)) if (pb->padIndex() == 0) pad0 = pb;
+        CHECK (pad0 != nullptr, "finds pad A1 on screen");
+        auto tapPeak = [&] (float yFrac)
+        {
+            juce::MidiBuffer none;
+            { juce::AudioBuffer<float> quiet (2, 44100); juce::MidiBuffer off; off.addEvent (juce::MidiMessage::allNotesOff (10), 0); q.processBlock (quiet, off); q.processBlock (quiet, none); }
+            auto src = juce::Desktop::getInstance().getMainMouseSource();
+            const juce::Point<float> pos ((float) pad0->getWidth() * 0.5f, (float) pad0->getHeight() * yFrac);
+            const auto now = juce::Time::getCurrentTime();
+            juce::MouseEvent e (src, pos, juce::ModifierKeys::leftButtonModifier, 1.0f, 0, 0, 0, 0, pad0, pad0, now, pos, now, 1, false);
+            pad0->mouseDown (e);
+            juce::AudioBuffer<float> b (2, 4096); q.processBlock (b, none);
+            juce::MouseEvent up (src, pos, {}, 1.0f, 0, 0, 0, 0, pad0, pad0, now, pos, now, 1, false);
+            pad0->mouseUp (up);
+            return b.getMagnitude (0, 0, b.getNumSamples());
+        };
+        const float fixedTop = tapPeak (0.1f), fixedBottom = tapPeak (0.9f);
+        CHECK (fixedTop > 0.001f, "a single tap plays a pad that only has a synth layer");
+        CHECK (std::abs (fixedTop - fixedBottom) < 0.02f * fixedTop, "touch velocity off: every tap is the same level");
+        q.touchVelocity = true;
+        const float top = tapPeak (0.1f), bottom = tapPeak (0.9f);
+        std::printf ("    pad tap peaks: fixed %.3f / %.3f, touch top %.3f bottom %.3f\n", fixedTop, fixedBottom, top, bottom);
+        CHECK (top > bottom * 1.5f, "touch velocity on: a tap near the top of a pad is louder");
+        ed.reset();
+        juce::MemoryBlock mb; q.getStateInformation (mb);
+        OmniProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        CHECK (r.touchVelocity.load(), "the touch velocity setting is saved with the session");
+        CHECK (r.getBusCount (false) == kOutputs, "16 stereo outputs on every platform");
+    }
     std::printf (failures ? "FAILURES: %d\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }

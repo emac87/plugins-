@@ -20,13 +20,17 @@ AudioProcessorValueTreeState::ParameterLayout OmniProcessor::createLayout()
     return l;
 }
 
-// Main stereo output plus Out 2..16 (off until the host turns them on, e.g. Logic's "Multi-Output").
+// Main stereo output plus Out 2..16. On the desktop they're off until the host turns them on (e.g. Logic's
+// "Multi-Output"). On iPad/iPhone they're on from the start, so AUv3 hosts such as AUM and Loopy Pro list them.
 AudioProcessor::BusesProperties OmniProcessor::makeBuses()
 {
-    auto b = BusesProperties().withOutput ("Main", AudioChannelSet::stereo(), true);
-   #if ! JUCE_IOS
-    for (int i = 1; i < omni::kOutputs; ++i) b = b.withOutput ("Out " + String (i + 1), AudioChannelSet::stereo(), false);
+   #if JUCE_IOS
+    constexpr bool extraOn = true;
+   #else
+    constexpr bool extraOn = false;
    #endif
+    auto b = BusesProperties().withOutput ("Main", AudioChannelSet::stereo(), true);
+    for (int i = 1; i < omni::kOutputs; ++i) b = b.withOutput ("Out " + String (i + 1), AudioChannelSet::stereo(), extraOn);
     return b;
 }
 
@@ -73,11 +77,13 @@ void OmniProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     engine.setOffline (isNonRealtime());
 
     // Where each output's channels start in this block's buffer (-1 = output off -> main).
+    // The standalone app only plays its Main output, so everything goes there.
+    const bool mainOnly = wrapperType == wrapperType_Standalone;
     int busCh[kOutputs];
     for (int b = 0; b < kOutputs; ++b)
     {
         busCh[b] = -1;
-        if (b < getBusCount (false))
+        if (b < getBusCount (false) && (b == 0 || ! mainOnly))
             if (auto* bus = getBus (false, b); bus != nullptr && bus->isEnabled() && bus->getNumberOfChannels() > 0)
                 busCh[b] = getChannelIndexInProcessBlockBuffer (false, b, 0);
     }
@@ -248,6 +254,7 @@ void OmniProcessor::getStateInformation (MemoryBlock& dest)
     auto xml = state.createXml();
     xml->setAttribute ("stateVersion", kStateVersion);
     xml->setAttribute ("streaming", isStreaming());
+    xml->setAttribute ("touchVelocity", touchVelocity.load());
     xml->addChildElement (instrumentToXml (*current).release());
     copyXmlToBinary (*xml, dest);
 }
@@ -258,6 +265,8 @@ void OmniProcessor::setStateInformation (const void* data, int size)
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return;
     setStreaming (xml->getBoolAttribute ("streaming", true));
     xml->removeAttribute ("streaming");
+    touchVelocity = xml->getBoolAttribute ("touchVelocity", false);
+    xml->removeAttribute ("touchVelocity");
     if (auto* inst = xml->getChildByName ("Omnisampler"))
     {
         StringArray missing;

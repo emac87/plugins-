@@ -374,7 +374,7 @@ void ZoneEditor::resized()
 }
 
 #if JUCE_IOS
-static const char* const emptyPadHint = "tap to load";
+static const char* const emptyPadHint = "hold to load";
 #else
 static const char* const emptyPadHint = "drop samples";
 #endif
@@ -422,20 +422,55 @@ void PadButton::paint (Graphics& g)
     }
 }
 
-void PadButton::mouseDown (const MouseEvent&)
+// Velocity for a tap on the on-screen pads: fixed, or (touch velocity on) louder towards the top of the pad.
+static float padVelocity (bool touch, const MouseEvent& e, int height)
+{
+    if (! touch || height <= 0) return 0.8f;
+    return jlimit (0.08f, 1.0f, 1.0f - e.position.y / (float) height * 0.92f);
+}
+
+PadButton::~PadButton() { stopTimer(); release(); }
+
+// A tap plays the pad at once (a synth layer on an otherwise empty pad too). On iPad/iPhone,
+// where there's no drag and drop, holding a pad for half a second opens the file picker instead.
+void PadButton::mouseDown (const MouseEvent& e)
 {
     ed.selectPad (padIndex());
     const auto& p = ed.proc.getInstrument()->pads[padIndex()];
+    release();
+    if (! p.isEmpty())
+    {
+        playing = p.note; playingCh = ed.playChannel (true);
+        ed.proc.padState.noteOn (playingCh, playing, padVelocity (ed.proc.touchVelocity.load(), e, getHeight()));
+    }
    #if JUCE_IOS
-    if (p.isEmpty()) { ed.browsePadSamples (padIndex()); return; }   // no drag and drop on iOS: tap an empty pad to fill it
+    startTimer (500);
    #endif
-    ed.proc.padState.noteOn (ed.playChannel (true), p.note, 0.8f);
+}
+
+void PadButton::mouseDrag (const MouseEvent& e)
+{
+    if (e.getDistanceFromDragStart() > 12) stopTimer();   // a swipe, not a hold
 }
 
 void PadButton::mouseUp (const MouseEvent&)
 {
-    const auto& p = ed.proc.getInstrument()->pads[padIndex()];
-    ed.proc.padState.noteOff (ed.playChannel (true), p.note, 0.0f);
+    stopTimer();
+    release();
+}
+
+void PadButton::release()
+{
+    if (playing >= 0) ed.proc.padState.noteOff (playingCh, playing, 0.0f);
+    playing = -1;
+}
+
+void PadButton::timerCallback()
+{
+    stopTimer();
+    if (! isMouseButtonDown()) return;
+    release();
+    ed.browsePadSamples (padIndex());
 }
 
 void PadButton::filesDropped (const StringArray& files, int, int)
@@ -638,6 +673,7 @@ OmniEditor::OmniEditor (OmniProcessor& p)
     // ---- keys ----
     keysTitle.setFont (FontOptions (16.0f, Font::bold));
     keyboard.setAvailableRange (21, 108);
+    applyTouchVelocity();
     keyboard.setMidiChannel (1);
     loadInstBtn.onClick = [this] { browseInstrument(); };
     addKeysBtn.onClick = [this] { browseKeySamples(); };
@@ -673,9 +709,7 @@ OmniEditor::OmniEditor (OmniProcessor& p)
                                                        &keyZoneEditor, &padVoicing, &keyVoicing, &optionsBtn, &layersPanel, &saveDsBtn, &addSynthBtn,
                                                        &padBottomTab[0], &padBottomTab[1] })
         addAndMakeVisible (c);
-   #if ! JUCE_IOS
     for (auto* c : std::initializer_list<Component*> { &padOutput, &keysOutput, &padOutputLabel, &keysOutputLabel }) addChildComponent (c);
-   #endif
 
     // Small screens show one of these three panels at a time (see isCompact).
     for (int i = 0; i < 4; ++i)
@@ -752,11 +786,13 @@ void OmniEditor::applyVisibility()
     show ({ &detailBtn[3] }, c && ! keys);
    #if ! JUCE_IOS
     show ({ &saveDsBtn }, keys);
-    show ({ &padOutput, &padOutputLabel }, ! keys && ! c && list);
-    show ({ &keysOutput, &keysOutputLabel }, keys && sound);
    #else
     saveDsBtn.setVisible (false);
    #endif
+    // Output pickers: plug-in only (the standalone app plays Main). Small screens show them on the Sound panel.
+    const bool outs = proc.hasOutputPicker();
+    show ({ &padOutput, &padOutputLabel }, outs && ! keys && (c ? detail == 2 : list));
+    show ({ &keysOutput, &keysOutputLabel }, outs && keys && sound);
     show ({ &voices }, true);
     zoneList.setRowHeight (c ? 30 : 22);
 }
@@ -1006,14 +1042,25 @@ void OmniEditor::showSaveMenu()
     });
 }
 
+void OmniEditor::applyTouchVelocity()
+{
+    // JUCE's keyboard: with mouse-position velocity on, a tap nearer the front (bottom) of a key is louder.
+    keyboard.setVelocity (1.0f, proc.touchVelocity.load());
+}
+
 void OmniEditor::showOptionsMenu()
 {
     PopupMenu m;
+    m.addItem (3, "Velocity-sensitive on-screen pads and keys", true, proc.touchVelocity.load());
+    m.addItem (4, "(pads: louder towards the top; keys: louder towards the bottom)", false, false);
+    m.addSeparator();
     m.addItem (1, "Stream long samples from disk", true, proc.isStreaming());
     m.addItem (2, "(applies to samples loaded afterwards)", false, false);
     m.showMenuAsync (PopupMenu::Options().withTargetComponent (&optionsBtn), [safe = Component::SafePointer<OmniEditor> (this)] (int r)
     {
-        if (safe != nullptr && r == 1) safe->proc.setStreaming (! safe->proc.isStreaming());
+        if (safe == nullptr) return;
+        if (r == 1) safe->proc.setStreaming (! safe->proc.isStreaming());
+        if (r == 3) { safe->proc.touchVelocity = ! safe->proc.touchVelocity.load(); safe->applyTouchVelocity(); }
     });
 }
 
@@ -1277,7 +1324,16 @@ void OmniEditor::layoutPadsCompact (Rectangle<int> r)
         zoneList.setBounds (r);
     }
     else if (detail == 1) padZoneEditor.setBounds (r);
-    else if (detail == 2) padVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
+    else if (detail == 2)
+    {
+        if (padOutput.isVisible())
+        {
+            auto out = r.removeFromTop (30);
+            padOutputLabel.setBounds (out.removeFromLeft (56)); padOutput.setBounds (out.removeFromLeft (jmin (110, out.getWidth())));
+            r.removeFromTop (4);
+        }
+        padVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
+    }
     else                  layersPanel.setBounds (r);
 }
 
@@ -1313,7 +1369,16 @@ void OmniEditor::layoutKeysCompact (Rectangle<int> r)
         zoneList.setBounds (r);
     }
     else if (detail == 1) keyZoneEditor.setBounds (r);
-    else                  keyVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
+    else
+    {
+        if (keysOutput.isVisible())
+        {
+            auto out = r.removeFromTop (30);
+            keysOutputLabel.setBounds (out.removeFromLeft (56)); keysOutput.setBounds (out.removeFromLeft (jmin (110, out.getWidth())));
+            r.removeFromTop (4);
+        }
+        keyVoicing.setBounds (r.withHeight (jmin (r.getHeight(), 260)));
+    }
 }
 
 void OmniEditor::layoutPads (Rectangle<int> r)
@@ -1343,9 +1408,7 @@ void OmniEditor::layoutPads (Rectangle<int> r)
     r.removeFromTop (6);
     padNoteLabel.setBounds (row2.removeFromLeft (64)); padNote.setBounds (row2.removeFromLeft (110)); row2.removeFromLeft (8);
     chokeLabel.setBounds (row2.removeFromLeft (44)); chokeBox.setBounds (row2.removeFromLeft (90)); row2.removeFromLeft (8);
-   #if ! JUCE_IOS
     padOutputLabel.setBounds (row2.removeFromLeft (46)); padOutput.setBounds (row2.removeFromLeft (jmin (84, row2.getWidth())));
-   #endif
     auto voicing = r.removeFromBottom (jmin (262, r.getHeight() / 2));
     auto bottomTabs = voicing.removeFromTop (24);
     voicing.removeFromTop (2);
@@ -1386,11 +1449,12 @@ void OmniEditor::layoutKeys (Rectangle<int> r)
     r.removeFromTop (8);
     auto bottom = r;
     auto voicingCol = bottom.removeFromRight (bottom.getWidth() * 5 / 11);
-   #if ! JUCE_IOS
-    auto outRow = voicingCol.removeFromTop (26);
-    voicingCol.removeFromTop (4);
-    keysOutputLabel.setBounds (outRow.removeFromLeft (56)); keysOutput.setBounds (outRow.removeFromLeft (110));
-   #endif
+    if (keysOutput.isVisible())
+    {
+        auto outRow = voicingCol.removeFromTop (26);
+        voicingCol.removeFromTop (4);
+        keysOutputLabel.setBounds (outRow.removeFromLeft (56)); keysOutput.setBounds (outRow.removeFromLeft (110));
+    }
     keyVoicing.setBounds (voicingCol);
     bottom.removeFromRight (10);
     auto listCol = bottom.removeFromLeft (bottom.getWidth() / 2);

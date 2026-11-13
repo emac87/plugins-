@@ -74,12 +74,14 @@ private:
     juce::Array<Field*> fields() { return { &root, &loKey, &hiKey, &loVel, &hiVel, &rrPos, &tune, &gain }; }
 };
 
-class PadButton : public juce::Component, public juce::FileDragAndDropTarget
+class PadButton : public juce::Component, public juce::FileDragAndDropTarget, private juce::Timer
 {
 public:
     PadButton (OmniEditor&, int slot);
+    ~PadButton() override;
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void filesDropped (const juce::StringArray&, int, int) override;
@@ -90,9 +92,12 @@ public:
     juce::uint32 lastHits = 0;
 
 private:
+    void timerCallback() override;   // the press became a hold: open the file picker (iOS)
+    void release();
     OmniEditor& ed;
     const int slot;   // 0..15 within the bank
     bool hover = false;
+    int playing = -1, playingCh = 0;   // note this press started, if any
 };
 
 // Key/velocity map for the Keys section.
@@ -150,6 +155,7 @@ private:
     void saveSfzAs();
     void saveDecentSamplerAs();
     void showOptionsMenu();
+    void applyTouchVelocity();
     void showSaveMenu();
     void padFilesChosen (int pad, const juce::Array<juce::File>&);
     void instrumentChosen (const juce::File&);   // .omni, any instrument format, or a folder
