@@ -634,7 +634,7 @@ CaptureRackEditor::CaptureRackEditor (CaptureRackProcessor& p)
     for (int s = 0; s < CaptureRackProcessor::kSlots; ++s)
     {
         slots[s] = std::make_unique<SlotCard> (p, *this, s);
-        addAndMakeVisible (*slots[s]);
+        content.addAndMakeVisible (*slots[s]);
     }
     tabs.addTab ("Library", look::panel, &libraryPanel, false);
     tabs.addTab ("TONE3000", look::panel, &toneBrowser, false);
@@ -642,10 +642,17 @@ CaptureRackEditor::CaptureRackEditor (CaptureRackProcessor& p)
     tabs.setOutline (0);
 
     for (auto* c : std::initializer_list<Component*> { &logo, &chainLabel, &input, &output, &bass, &mid, &treble, &routing, &normBtn, &saveBtn, &loadBtn, &irCard, &tabs })
-        addAndMakeVisible (c);
+        content.addAndMakeVisible (c);
+    content.addChildComponent (browseBtn);
+    browseBtn.onClick = [this] { showBrowser = ! showBrowser; resized(); };
+    addAndMakeVisible (content);
 
     setResizable (true, true);
+   #if JUCE_IOS
+    setResizeLimits (240, 160, 4000, 4000);   // the layout scales itself to whatever the screen or host gives us
+   #else
     setResizeLimits (980, 680, 2000, 1400);
+   #endif
     setSize (1180, 800);
     refreshAll();
     startTimerHz (20);
@@ -667,16 +674,26 @@ void CaptureRackEditor::refreshAll()
 
 void CaptureRackEditor::timerCallback()
 {
+   #if JUCE_IOS
+    // Re-fit when the device rotates or the view first appears (safe area changes).
+    if (isShowing())
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds()))
+        {
+            const auto now = d->safeAreaInsets.subtractedFrom (d->totalArea).getIntersection (getScreenBounds());
+            if (now != lastSafeCheck) { lastSafeCheck = now; resized(); }
+        }
+   #endif
     inLevel = jmax (proc.inMeter.load(), inLevel * 0.85f);
     outLevel = jmax (proc.outMeter.load(), outLevel * 0.85f);
     proc.inMeter.store (0); proc.outMeter.store (0);
-    repaint (0, 0, getWidth(), 60);
+    repaint (getLocalArea (&content, juce::Rectangle<int> (0, 0, content.getWidth(), 70)));
     for (auto& s : slots) s->repaint();
 }
 
 void CaptureRackEditor::paint (Graphics& g)
 {
     g.fillAll (look::bg);
+    g.addTransform (content.getTransform());   // meters live in the content layer's coordinates
     // Meters next to the input and output knobs.
     auto meter = [&g] (Rectangle<int> r, float lvl)
     {
@@ -694,7 +711,25 @@ void CaptureRackEditor::paint (Graphics& g)
 
 void CaptureRackEditor::resized()
 {
-    auto r = getLocalBounds().reduced (10);
+    // Fit the whole UI into the usable area: stay clear of the notch / Dynamic Island / home bar,
+    // and shrink the layout when the space is smaller than the design minimum (980 x 680).
+    auto area = getLocalBounds();
+   #if JUCE_IOS
+    if (isShowing())
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds()))
+        {
+            const auto safe = d->safeAreaInsets.subtractedFrom (d->totalArea);
+            const auto local = getLocalArea (nullptr, safe).getIntersection (getLocalBounds());
+            if (local.getWidth() > 100 && local.getHeight() > 100) area = local;
+        }
+   #endif
+    // Short screens (iPhone landscape): show the rack OR the browser so the controls stay a usable size.
+    const bool compact = (float) area.getHeight() / 680.0f < 0.85f * (float) area.getWidth() / 980.0f;
+    const float s = juce::jmin (1.0f, (float) area.getWidth() / 980.0f, (float) area.getHeight() / (compact ? 390.0f : 680.0f));
+    content.setTransform (juce::AffineTransform::scale (s).translated ((float) area.getX(), (float) area.getY()));
+    content.setBounds (0, 0, juce::roundToInt ((float) area.getWidth() / s), juce::roundToInt ((float) area.getHeight() / s));
+
+    auto r = content.getLocalBounds().reduced (10);
     auto top = r.removeFromTop (56);
     logo.setBounds (top.removeFromLeft (170));
     input.setBounds (top.removeFromLeft (64)); top.removeFromLeft (14);
@@ -703,10 +738,22 @@ void CaptureRackEditor::resized()
     loadBtn.setBounds (top.removeFromRight (60).withSizeKeepingCentre (60, 28)); top.removeFromRight (6);
     saveBtn.setBounds (top.removeFromRight (60).withSizeKeepingCentre (60, 28)); top.removeFromRight (16);
     output.setBounds (top.removeFromRight (64)); top.removeFromRight (14);
+    browseBtn.setVisible (compact);
+    if (compact)
+    {
+        browseBtn.setButtonText (showBrowser ? "Rack" : "Library");
+        browseBtn.setBounds (top.removeFromRight (76).withSizeKeepingCentre (76, 28)); top.removeFromRight (8);
+    }
     chainLabel.setBounds (top);
 
+    const bool rackVisible = ! compact || ! showBrowser;
+    for (auto& sl : slots) sl->setVisible (rackVisible);
+    for (auto* c : std::initializer_list<Component*> { &irCard, &bass, &mid, &treble }) c->setVisible (rackVisible);
+    tabs.setVisible (! compact || showBrowser);
+    if (compact && showBrowser) { r.removeFromTop (6); tabs.setBounds (r); return; }
+
     r.removeFromTop (6);
-    auto rack = r.removeFromTop (jmax (290, r.getHeight() / 2 - 10));
+    auto rack = compact ? r : r.removeFromTop (jmax (290, r.getHeight() / 2 - 10));
     auto tone = rack.removeFromRight (130);
     rack.removeFromRight (8);
     auto ir = rack.removeFromRight (220);

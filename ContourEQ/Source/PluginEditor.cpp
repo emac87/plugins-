@@ -714,15 +714,20 @@ ContourEditor::ContourEditor (ContourProcessor& p)
 
     for (auto* c : std::initializer_list<juce::Component*> { &logo, &analyserBox, &rangeBox, &scaleKnob, &outKnob, &panKnob, &undoBtn, &redoBtn,
                                                              &abBtn, &abCopyBtn, &saveBtn, &loadBtn, &matchBtn, &phaseLabel, &display, &bandPanel })
-        addAndMakeVisible (c);
-    addChildComponent (matchPanel);
+        content.addAndMakeVisible (c);
+    content.addChildComponent (matchPanel);
+    addAndMakeVisible (content);
 
     display.matchRef = &matchPanel.ref;
     display.matchSrc = &matchPanel.src;
     display.matchTarget = &matchPanel.target;
 
     setResizable (true, true);
+   #if JUCE_IOS
+    setResizeLimits (240, 160, 4000, 4000);   // the layout scales itself to whatever the screen or host gives us
+   #else
     setResizeLimits (820, 520, 2200, 1400);
+   #endif
     setSize (1120, 680);
     startTimerHz (30);
 }
@@ -742,6 +747,15 @@ void ContourEditor::selectBand (int b)
 
 void ContourEditor::timerCallback()
 {
+   #if JUCE_IOS
+    // Re-fit when the device rotates or the view first appears (safe area changes).
+    if (isShowing())
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds()))
+        {
+            const auto now = d->safeAreaInsets.subtractedFrom (d->totalArea).getIntersection (getScreenBounds());
+            if (now != lastSafeCheck) { lastSafeCheck = now; resized(); }
+        }
+   #endif
     proc.preTap.tick();
     proc.postTap.tick();
     proc.scTap.tick();
@@ -759,7 +773,23 @@ void ContourEditor::paint (juce::Graphics& g) { g.fillAll (look::bg); }
 
 void ContourEditor::resized()
 {
-    auto r = getLocalBounds().reduced (8);
+    // Fit the whole UI into the usable area: stay clear of the notch / Dynamic Island / home bar,
+    // and shrink the layout when the space is smaller than the design minimum (820 x 520).
+    auto area = getLocalBounds();
+   #if JUCE_IOS
+    if (isShowing())
+        if (auto* d = juce::Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds()))
+        {
+            const auto safe = d->safeAreaInsets.subtractedFrom (d->totalArea);
+            const auto local = getLocalArea (nullptr, safe).getIntersection (getLocalBounds());
+            if (local.getWidth() > 100 && local.getHeight() > 100) area = local;
+        }
+   #endif
+    const float s = juce::jmin (1.0f, (float) area.getWidth() / 820.0f, (float) area.getHeight() / 520.0f);
+    content.setTransform (juce::AffineTransform::scale (s).translated ((float) area.getX(), (float) area.getY()));
+    content.setBounds (0, 0, juce::roundToInt ((float) area.getWidth() / s), juce::roundToInt ((float) area.getHeight() / s));
+
+    auto r = content.getLocalBounds().reduced (8);
     auto top = r.removeFromTop (46);
     logo.setBounds (top.removeFromLeft (130));
     analyserBox.setBounds (top.removeFromLeft (170).reduced (0, 9)); top.removeFromLeft (8);

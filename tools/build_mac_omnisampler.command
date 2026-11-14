@@ -6,6 +6,7 @@
 # Uses the JUCE copy in Claude Workbench (the one the iPad/iPhone builds use), so nothing is downloaded.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$(dirname "$0")/.." || exit 1
+bash tools/sync.sh; [ $? -eq 2 ] && { echo "BUILD_MAC_RESULT=FAILED at: local changes not on GitHub (tools/sync.log)" | tee tools/build_mac.log; exit 2; }
 ROOT="$PWD"; WB="$HOME/Documents/Claude Workbench"
 LOG="$ROOT/tools/build_mac.log"; : > "$LOG"
 say () { echo "$@" | tee -a "$LOG"; }

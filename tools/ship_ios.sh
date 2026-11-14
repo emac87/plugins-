@@ -4,6 +4,8 @@
 # Logs: tools/generate-<Plugin>.log (CMake) and build-ios-<Plugin>/tools/testflight.log (archive + upload)
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 P="$1"; cd "$(dirname "$0")/.." || exit 1
+# Match GitHub first; stop if this folder has changes that aren't on GitHub (see tools/sync.sh).
+bash tools/sync.sh; [ $? -eq 2 ] && { echo "STOPPED: local changes not on GitHub (tools/sync.log)" | tee -a tools/ship_stopped.log; exit 2; }
 case "$P" in
   ContourEQ)   OPT=-DBUILD_CONTOUR_EQ=ON;   B=contoureq ;;
   CaptureRack) OPT=-DBUILD_CAPTURE_RACK=ON; B=capturerack ;;

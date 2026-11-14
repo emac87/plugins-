@@ -105,6 +105,7 @@ public:
     ~ContourEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    void parentHierarchyChanged() override { resized(); }
 
     void selectBand (int b);
     int getSelectedBand() const { return selected; }
@@ -118,7 +119,9 @@ private:
     ContourProcessor& proc;
     look::PluginLook lnf { juce::Colour (0xff35c9b4) };
     int selected = -1;
+    juce::Rectangle<int> lastSafeCheck;
 
+    juce::Component content;   // holds every control; scaled to fit small screens (iPhone) and kept inside the safe area
     EqDisplay display;
     BandPanel bandPanel;
     MatchPanel matchPanel;

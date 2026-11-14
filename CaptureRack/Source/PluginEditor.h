@@ -155,6 +155,7 @@ public:
     ~CaptureRackEditor() override;
     void paint (juce::Graphics&) override;
     void resized() override;
+    void parentHierarchyChanged() override { resized(); }
 
     void refreshAll();
     void libraryChanged() { libraryPanel.reload(); }
@@ -166,10 +167,13 @@ private:
     void loadPreset();
 
     CaptureRackProcessor& proc;
+    juce::Rectangle<int> lastSafeCheck;
+    juce::Component content;   // holds every control; scaled to fit small screens (iPhone) and kept inside the safe area
     juce::Label logo, chainLabel;
     look::Knob input { "INPUT" }, output { "OUTPUT" }, bass { "BASS" }, mid { "MID" }, treble { "TREBLE" };
     juce::ComboBox routing;
-    juce::TextButton normBtn { "Normalise" }, saveBtn { "Save" }, loadBtn { "Load" };
+    juce::TextButton normBtn { "Normalise" }, saveBtn { "Save" }, loadBtn { "Load" }, browseBtn { "Library" };
+    bool showBrowser = false;   // compact (iPhone) layout: rack or Library/TONE3000, one at a time
     std::unique_ptr<SA> aIn, aOut, aBass, aMid, aTreble;
     std::unique_ptr<BA> aNorm;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> aRouting;
