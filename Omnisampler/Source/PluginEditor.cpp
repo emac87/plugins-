@@ -870,7 +870,7 @@ void OmniEditor::instrumentChosen (const File& f)
         {
             PopupMenu m;
             for (int i = 0; i < found.size(); ++i) m.addItem (i + 1, found[i].getRelativePathFrom (f));
-            m.showMenuAsync (PopupMenu::Options().withTargetComponent (showingKeys ? (Component*) &loadInstBtn : (Component*) &loadKitBtn),
+            m.showMenuAsync (look::menuFor (showingKeys ? (Component*) &loadInstBtn : (Component*) &loadKitBtn),
                              [safe = Component::SafePointer<OmniEditor> (this), found] (int r) { if (safe != nullptr && r > 0) safe->instrumentChosen (found[r - 1]); });
             return;
         }
@@ -919,7 +919,7 @@ void OmniEditor::showLoadMenu (Component& target, bool withKits)
     }
     m.addItem (1, withKits ? "File (.omni kit, .sf2, .dslibrary, .zip...)..." : "File (.sf2, .dslibrary, .zip...)...");
     m.addItem (2, "Folder (SFZ or DecentSampler with its samples)...");
-    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&target),
+    m.showMenuAsync (look::menuFor (&target),
                      [safe = Component::SafePointer<OmniEditor> (this), kits] (int r)
     {
         if (safe == nullptr || r == 0) return;
@@ -1070,7 +1070,7 @@ void OmniEditor::showSaveMenu()
     PopupMenu m;
     m.addItem (1, "Save as SFZ");
     m.addItem (2, "Save as DecentSampler");
-    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&saveSfzBtn), [safe = Component::SafePointer<OmniEditor> (this)] (int r)
+    m.showMenuAsync (look::menuFor (&saveSfzBtn), [safe = Component::SafePointer<OmniEditor> (this)] (int r)
     {
         if (safe == nullptr) return;
         if (r == 1) safe->saveSfzAs();
@@ -1092,7 +1092,7 @@ void OmniEditor::showOptionsMenu()
     m.addSeparator();
     m.addItem (1, "Stream long samples from disk", true, proc.isStreaming());
     m.addItem (2, "(applies to samples loaded afterwards)", false, false);
-    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&optionsBtn), [safe = Component::SafePointer<OmniEditor> (this)] (int r)
+    m.showMenuAsync (look::menuFor (&optionsBtn), [safe = Component::SafePointer<OmniEditor> (this)] (int r)
     {
         if (safe == nullptr) return;
         if (r == 1) safe->proc.setStreaming (! safe->proc.isStreaming());
@@ -1105,7 +1105,7 @@ void OmniEditor::addSynthLayerMenu (Component& target)
 {
     PopupMenu m;
     for (int i = 0; i < (int) DrumModel::NumModels; ++i) m.addItem (i + 1, drumModelName ((DrumModel) i));
-    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&target), [safe = Component::SafePointer<OmniEditor> (this), pad = selectedPad] (int r)
+    m.showMenuAsync (look::menuFor (&target), [safe = Component::SafePointer<OmniEditor> (this), pad = selectedPad] (int r)
     {
         if (safe == nullptr || r <= 0) return;
         const auto model = (DrumModel) (r - 1);

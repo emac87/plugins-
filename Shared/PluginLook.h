@@ -183,6 +183,14 @@ namespace look
        #endif
     }
 
+    // Options for a pop-up menu under `target`. On iOS the menu is put inside the plug-in's view
+    // explicitly: a menu that hasn't been given a LookAndFeel never asks PluginLook where to go,
+    // so without this it opens as its own window, which an AUv3 (AUM etc.) never shows.
+    inline juce::PopupMenu::Options menuFor (juce::Component* target)
+    {
+        return juce::PopupMenu::Options().withTargetComponent (target).withParentComponent (menuParent (target));
+    }
+
     // Shows an AlertWindow modally (it deletes itself). On iOS it goes inside the plug-in's view.
     inline void presentAlert (juce::Component* owner, juce::AlertWindow* w, std::function<void (int)> done = {})
     {

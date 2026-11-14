@@ -475,7 +475,7 @@ void SamplingPanel::showLibrary()
     if (found.isEmpty()) menu.addItem (30000, "Nothing auto-sampled yet", false);
     menu.addSeparator();
     menu.addItem (30001, "Show the library folder");
-    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&libraryBtn), [safe = Component::SafePointer<SamplingPanel> (this), found] (int r)
+    menu.showMenuAsync (look::menuFor (&libraryBtn), [safe = Component::SafePointer<SamplingPanel> (this), found] (int r)
     {
         if (safe == nullptr || r == 0) return;
         if (r == 30001) { libraryFolder().createDirectory(); libraryFolder().revealToUser(); return; }
@@ -496,7 +496,7 @@ void SamplingPanel::choosePlugin()
     menu.addSeparator();
     menu.addItem (20001, "Look for plug-ins again");
     if (proc.hosted() != nullptr) menu.addItem (20002, "Unload " + proc.hostedName);
-    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&choosePluginBtn), [safe = Component::SafePointer<SamplingPanel> (this), list] (int r)
+    menu.showMenuAsync (look::menuFor (&choosePluginBtn), [safe = Component::SafePointer<SamplingPanel> (this), list] (int r)
     {
         if (safe == nullptr || r == 0) return;
         if (r == 20001) { safe->proc.instrumentPlugins (true); return; }
